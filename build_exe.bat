@@ -11,7 +11,7 @@ echo 使用解释器: %PY%
 %PY% -m pip install -r requirements.txt -q
 %PY% -m pip install -r requirements-build.txt -q
 
-%PY% -m PyInstaller --noconfirm --clean --onefile --windowed --name ImgAspectRatio main.py
+%PY% -m PyInstaller --noconfirm --clean ImgAspectRatio.spec
 if errorlevel 1 (
   echo 打包失败。
   exit /b 1
