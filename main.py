@@ -160,6 +160,162 @@ def build_brightness_report(
     return "\n".join(lines), ok, fail
 
 
+def rename_stem(index: int) -> str:
+    n = index // 2 + 1
+    return str(n) if index % 2 == 0 else f"{n}-{n}"
+
+
+def rename_target_path(src_path: str, index: int) -> str:
+    ext = os.path.splitext(src_path)[1]
+    return os.path.join(os.path.dirname(src_path), rename_stem(index) + ext)
+
+
+def validate_rename_batch(paths: list[str]) -> str | None:
+    if not paths:
+        return "未选择任何图片。"
+    dirs = {os.path.dirname(p) for p in paths}
+    if len(dirs) > 1:
+        return "所选图片须在同一文件夹内。"
+    src_cases = {os.path.normcase(p) for p in paths}
+    for i, src in enumerate(paths):
+        dest = rename_target_path(src, i)
+        if os.path.normcase(src) == os.path.normcase(dest):
+            continue
+        if os.path.exists(dest) and os.path.normcase(dest) not in src_cases:
+            return f"目标文件名已存在：{os.path.basename(dest)}"
+    return None
+
+
+def rename_one_file(src: str, dest: str) -> tuple[bool, str]:
+    src_name = os.path.basename(src)
+    dest_name = os.path.basename(dest)
+    try:
+        os.rename(src, dest)
+        return True, f"{src_name} -> {dest_name}"
+    except Exception as e:
+        return False, f"{src_name} - 错误: {e}"
+
+
+def build_rename_preview(paths: list[str]) -> str:
+    lines = [
+        f"{os.path.basename(src)} -> {os.path.basename(rename_target_path(src, i))}"
+        for i, src in enumerate(paths)
+    ]
+    return "\n".join(lines)
+
+
+def ask_rename_confirm(parent: tk.Misc, paths: list[str]) -> bool:
+    """Show rename preview in a scrollable dialog; return True if user confirms."""
+    result = {"confirmed": False}
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("批量重命名")
+    dialog.transient(parent)
+    dialog.resizable(True, False)
+
+    def close(confirmed: bool) -> None:
+        result["confirmed"] = confirmed
+        dialog.grab_release()
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
+
+    tk.Label(
+        dialog,
+        text="将按以下规则重命名（不可撤销）：",
+        anchor="w",
+    ).pack(fill=tk.X, padx=12, pady=(12, 4))
+
+    list_frame = tk.Frame(dialog)
+    list_frame.pack(fill=tk.X, padx=12, pady=4)
+
+    scrollbar = tk.Scrollbar(list_frame)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    preview_box = tk.Text(
+        list_frame,
+        height=12,
+        width=52,
+        font=("Consolas", 10),
+        wrap=tk.NONE,
+        yscrollcommand=scrollbar.set,
+        state=tk.NORMAL,
+    )
+    preview_box.pack(side=tk.LEFT, fill=tk.BOTH)
+    scrollbar.config(command=preview_box.yview)
+
+    preview_box.insert(tk.END, build_rename_preview(paths))
+    preview_box.config(state=tk.DISABLED)
+
+    btn_frame = tk.Frame(dialog, padx=12, pady=12)
+    btn_frame.pack(fill=tk.X)
+    tk.Button(btn_frame, text="继续", width=8, command=lambda: close(True)).pack(
+        side=tk.RIGHT, padx=(6, 0)
+    )
+    tk.Button(btn_frame, text="取消", width=8, command=lambda: close(False)).pack(
+        side=tk.RIGHT
+    )
+
+    dialog.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    dw = dialog.winfo_width()
+    dh = dialog.winfo_height()
+    dialog.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result["confirmed"]
+
+
+def rename_images_batch(paths: list[str]) -> tuple[str, int, int]:
+    err = validate_rename_batch(paths)
+    if err:
+        return err, 0, len(paths)
+
+    plan = [(p, rename_target_path(p, i)) for i, p in enumerate(paths)]
+    lines: list[str] = []
+    ok = fail = 0
+    work: list[tuple[int, str, str]] = []
+
+    for i, (src, dest) in enumerate(plan):
+        if os.path.normcase(src) == os.path.normcase(dest):
+            name = os.path.basename(src)
+            lines.append(f"{name} - 已是目标名，跳过")
+            ok += 1
+        else:
+            work.append((i, src, dest))
+
+    tmp_map: dict[int, str] = {}
+    for i, src, _dest in work:
+        ext = os.path.splitext(src)[1]
+        tmp = os.path.join(os.path.dirname(src), f".__rename_tmp_{i}{ext}")
+        success, line = rename_one_file(src, tmp)
+        if success:
+            tmp_map[i] = tmp
+        else:
+            lines.append(line)
+            fail += 1
+
+    for i, _src, dest in work:
+        if i not in tmp_map:
+            continue
+        success, line = rename_one_file(tmp_map[i], dest)
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+
+    return "\n".join(lines), ok, fail
+
+
+def build_rename_report(paths: list[str]) -> tuple[str, int, int]:
+    return rename_images_batch(paths)
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -184,6 +340,9 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(0, 6)
         )
         tk.Button(bar, text="调整亮度…", command=self.on_adjust_brightness).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tk.Button(bar, text="批量重命名…", command=self.on_rename_images).pack(
             side=tk.LEFT
         )
 
@@ -262,6 +421,25 @@ class App(tk.Tk):
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, report)
         messagebox.showinfo("调整亮度", f"完成：成功 {ok} 张，失败 {fail} 张。")
+
+    def on_rename_images(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要重命名的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        paths = list(paths)
+        err = validate_rename_batch(paths)
+        if err:
+            messagebox.showerror("批量重命名", err)
+            return
+        if not ask_rename_confirm(self, paths):
+            return
+        report, ok, fail = build_rename_report(paths)
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo("批量重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
 
 def main() -> None:
