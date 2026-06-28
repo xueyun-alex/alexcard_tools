@@ -1,7 +1,8 @@
 import os
 import sys
 import tkinter as tk
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Callable, Iterable, Literal
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog
 
 from PIL import Image, ImageEnhance
@@ -165,12 +166,42 @@ def rename_stem(index: int) -> str:
     return str(n) if index % 2 == 0 else f"{n}-{n}"
 
 
-def rename_target_path(src_path: str, index: int) -> str:
+@dataclass(frozen=True)
+class RenamePattern:
+    mode: Literal["sequential", "paired"]
+    start: int
+
+
+def parse_rename_pattern(text: str) -> RenamePattern | None:
+    text = text.strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return RenamePattern("sequential", int(text))
+    if "-" in text:
+        left, _, right = text.partition("-")
+        if left.isdigit() and right.isdigit() and left == right:
+            return RenamePattern("paired", int(left))
+    return None
+
+
+def rename_stem_from_pattern(index: int, pattern: RenamePattern) -> str:
+    n = pattern.start + index
+    if pattern.mode == "sequential":
+        return str(n)
+    return f"{n}-{n}"
+
+
+def rename_target_path(
+    src_path: str, index: int, stem_fn: Callable[[int], str]
+) -> str:
     ext = os.path.splitext(src_path)[1]
-    return os.path.join(os.path.dirname(src_path), rename_stem(index) + ext)
+    return os.path.join(os.path.dirname(src_path), stem_fn(index) + ext)
 
 
-def validate_rename_batch(paths: list[str]) -> str | None:
+def validate_rename_batch(
+    paths: list[str], stem_fn: Callable[[int], str]
+) -> str | None:
     if not paths:
         return "未选择任何图片。"
     dirs = {os.path.dirname(p) for p in paths}
@@ -178,7 +209,7 @@ def validate_rename_batch(paths: list[str]) -> str | None:
         return "所选图片须在同一文件夹内。"
     src_cases = {os.path.normcase(p) for p in paths}
     for i, src in enumerate(paths):
-        dest = rename_target_path(src, i)
+        dest = rename_target_path(src, i, stem_fn)
         if os.path.normcase(src) == os.path.normcase(dest):
             continue
         if os.path.exists(dest) and os.path.normcase(dest) not in src_cases:
@@ -196,20 +227,29 @@ def rename_one_file(src: str, dest: str) -> tuple[bool, str]:
         return False, f"{src_name} - 错误: {e}"
 
 
-def build_rename_preview(paths: list[str]) -> str:
+def build_rename_preview(
+    paths: list[str], stem_fn: Callable[[int], str]
+) -> str:
     lines = [
-        f"{os.path.basename(src)} -> {os.path.basename(rename_target_path(src, i))}"
+        f"{os.path.basename(src)} -> {os.path.basename(rename_target_path(src, i, stem_fn))}"
         for i, src in enumerate(paths)
     ]
     return "\n".join(lines)
 
 
-def ask_rename_confirm(parent: tk.Misc, paths: list[str]) -> bool:
+def ask_rename_confirm(
+    parent: tk.Misc,
+    paths: list[str],
+    stem_fn: Callable[[int], str],
+    *,
+    title: str = "批量重命名",
+    hint: str = "将按以下规则重命名（不可撤销）：",
+) -> bool:
     """Show rename preview in a scrollable dialog; return True if user confirms."""
     result = {"confirmed": False}
 
     dialog = tk.Toplevel(parent)
-    dialog.title("批量重命名")
+    dialog.title(title)
     dialog.transient(parent)
     dialog.resizable(True, False)
 
@@ -222,7 +262,7 @@ def ask_rename_confirm(parent: tk.Misc, paths: list[str]) -> bool:
 
     tk.Label(
         dialog,
-        text="将按以下规则重命名（不可撤销）：",
+        text=hint,
         anchor="w",
     ).pack(fill=tk.X, padx=12, pady=(12, 4))
 
@@ -244,7 +284,7 @@ def ask_rename_confirm(parent: tk.Misc, paths: list[str]) -> bool:
     preview_box.pack(side=tk.LEFT, fill=tk.BOTH)
     scrollbar.config(command=preview_box.yview)
 
-    preview_box.insert(tk.END, build_rename_preview(paths))
+    preview_box.insert(tk.END, build_rename_preview(paths, stem_fn))
     preview_box.config(state=tk.DISABLED)
 
     btn_frame = tk.Frame(dialog, padx=12, pady=12)
@@ -270,12 +310,14 @@ def ask_rename_confirm(parent: tk.Misc, paths: list[str]) -> bool:
     return result["confirmed"]
 
 
-def rename_images_batch(paths: list[str]) -> tuple[str, int, int]:
-    err = validate_rename_batch(paths)
+def rename_images_batch(
+    paths: list[str], stem_fn: Callable[[int], str]
+) -> tuple[str, int, int]:
+    err = validate_rename_batch(paths, stem_fn)
     if err:
         return err, 0, len(paths)
 
-    plan = [(p, rename_target_path(p, i)) for i, p in enumerate(paths)]
+    plan = [(p, rename_target_path(p, i, stem_fn)) for i, p in enumerate(paths)]
     lines: list[str] = []
     ok = fail = 0
     work: list[tuple[int, str, str]] = []
@@ -312,8 +354,10 @@ def rename_images_batch(paths: list[str]) -> tuple[str, int, int]:
     return "\n".join(lines), ok, fail
 
 
-def build_rename_report(paths: list[str]) -> tuple[str, int, int]:
-    return rename_images_batch(paths)
+def build_rename_report(
+    paths: list[str], stem_fn: Callable[[int], str]
+) -> tuple[str, int, int]:
+    return rename_images_batch(paths, stem_fn)
 
 
 class App(tk.Tk):
@@ -343,6 +387,9 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(0, 6)
         )
         tk.Button(bar, text="批量重命名…", command=self.on_rename_images).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tk.Button(bar, text="序号重命名…", command=self.on_rename_by_pattern).pack(
             side=tk.LEFT
         )
 
@@ -430,16 +477,56 @@ class App(tk.Tk):
         if not paths:
             return
         paths = list(paths)
-        err = validate_rename_batch(paths)
+        err = validate_rename_batch(paths, rename_stem)
         if err:
             messagebox.showerror("批量重命名", err)
             return
-        if not ask_rename_confirm(self, paths):
+        if not ask_rename_confirm(self, paths, rename_stem):
             return
-        report, ok, fail = build_rename_report(paths)
+        report, ok, fail = build_rename_report(paths, rename_stem)
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, report)
         messagebox.showinfo("批量重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
+
+    def on_rename_by_pattern(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要重命名的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        paths = list(paths)
+        pattern_text = simpledialog.askstring(
+            "序号重命名",
+            "起始名称（如 1 → 1,2,3；1-1 → 1-1,2-2,3-3）：",
+            initialvalue="1",
+        )
+        if pattern_text is None:
+            return
+        pattern = parse_rename_pattern(pattern_text)
+        if pattern is None:
+            messagebox.showerror(
+                "序号重命名",
+                "起始名称无效。请输入整数（如 1）或相同数字对（如 1-1）。",
+            )
+            return
+        stem_fn = lambda i, p=pattern: rename_stem_from_pattern(i, p)
+        err = validate_rename_batch(paths, stem_fn)
+        if err:
+            messagebox.showerror("序号重命名", err)
+            return
+        if not ask_rename_confirm(
+            self,
+            paths,
+            stem_fn,
+            title="序号重命名",
+            hint="将按以下规则重命名（不可撤销）：",
+        ):
+            return
+        report, ok, fail = build_rename_report(paths, stem_fn)
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo("序号重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
 
 def main() -> None:
