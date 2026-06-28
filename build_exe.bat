@@ -17,5 +17,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo 已生成: %CD%\dist\ImgAspectRatio.exe
+echo 已生成: %CD%\dist\alexcard_tools-1.0.0.exe
 pause

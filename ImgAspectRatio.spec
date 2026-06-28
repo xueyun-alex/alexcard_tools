@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='ImgAspectRatio',
+    name='alexcard_tools-1.0.0',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
