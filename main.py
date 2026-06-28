@@ -51,6 +51,50 @@ def build_report(paths: Iterable[str]) -> str:
     return "\n".join(lines)
 
 
+def jpg_output_path(src_path: str, out_dir: str) -> str:
+    base, _ = os.path.splitext(os.path.basename(src_path))
+    return os.path.join(out_dir, f"{base}.jpg")
+
+
+def prepare_for_jpeg(im: Image.Image) -> Image.Image:
+    if im.mode in ("RGBA", "LA"):
+        bg = Image.new("RGB", im.size, (255, 255, 255))
+        bg.paste(im, mask=im.split()[-1])
+        return bg
+    if im.mode == "P":
+        return prepare_for_jpeg(im.convert("RGBA"))
+    if im.mode != "RGB":
+        return im.convert("RGB")
+    return im
+
+
+def convert_to_jpg(src_path: str, out_dir: str, quality: int = 90) -> tuple[bool, str]:
+    name = os.path.basename(src_path)
+    dest = jpg_output_path(src_path, out_dir)
+    try:
+        with Image.open(src_path) as im:
+            rgb = prepare_for_jpeg(im)
+            os.makedirs(out_dir, exist_ok=True)
+            rgb.save(dest, "JPEG", quality=quality)
+            w, h = rgb.size
+        return True, f"{os.path.basename(dest)} - 已保存 ({w}×{h})"
+    except Exception as e:
+        return False, f"{name} - 错误: {e}"
+
+
+def build_convert_report(paths: Iterable[str], out_dir: str) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for path in paths:
+        success, line = convert_to_jpg(path, out_dir)
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -65,6 +109,9 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(0, 6)
         )
         tk.Button(bar, text="复制全部", command=self.on_copy_all).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tk.Button(bar, text="转为 JPG…", command=self.on_convert_to_jpg).pack(
             side=tk.LEFT
         )
 
@@ -100,6 +147,21 @@ class App(tk.Tk):
         self.clipboard_append(content)
         self.update()
         messagebox.showinfo("复制", "已复制到剪贴板。")
+
+    def on_convert_to_jpg(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要转换的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        out_dir = filedialog.askdirectory(title="选择 JPG 输出文件夹")
+        if not out_dir:
+            return
+        report, ok, fail = build_convert_report(paths, out_dir)
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo("转为 JPG", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
 
 def main() -> None:
