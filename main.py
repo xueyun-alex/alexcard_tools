@@ -54,7 +54,7 @@ def build_report(paths: Iterable[str]) -> str:
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("批量图片长宽比 — 选择多张图片后查看或导出")
+        self.title("批量图片长宽比 — 选择多张图片后查看")
         self.minsize(520, 360)
         self.geometry("720x480")
 
@@ -65,9 +65,6 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(0, 6)
         )
         tk.Button(bar, text="复制全部", command=self.on_copy_all).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="导出 UTF-8 文本…", command=self.on_export).pack(
             side=tk.LEFT
         )
 
@@ -103,27 +100,6 @@ class App(tk.Tk):
         self.clipboard_append(content)
         self.update()
         messagebox.showinfo("复制", "已复制到剪贴板。")
-
-    def on_export(self) -> None:
-        content = self.text.get("1.0", tk.END).rstrip("\n")
-        if not content:
-            messagebox.showinfo("导出", "没有可导出的内容，请先选择图片。")
-            return
-        path = filedialog.asksaveasfilename(
-            title="导出为 UTF-8 文本",
-            defaultextension=".txt",
-            filetypes=[("文本", "*.txt"), ("所有文件", "*.*")],
-        )
-        if not path:
-            return
-        try:
-            with open(path, "w", encoding="utf-8", newline="\n") as f:
-                f.write(content)
-                f.write("\n")
-        except OSError as e:
-            messagebox.showerror("导出失败", str(e))
-            return
-        messagebox.showinfo("导出", f"已保存：\n{path}")
 
 
 def main() -> None:
