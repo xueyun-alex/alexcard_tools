@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import tkinter as tk
 from dataclasses import dataclass
@@ -364,6 +365,147 @@ def build_rename_report(
     return rename_images_batch(paths, stem_fn)
 
 
+def is_pure_sequence_stem(stem: str) -> bool:
+    return stem.isdigit() and int(stem) >= 1
+
+
+def filter_sequence_copy_paths(paths: list[str]) -> list[str]:
+    filtered = [
+        p
+        for p in paths
+        if is_pure_sequence_stem(os.path.splitext(os.path.basename(p))[0])
+    ]
+    return sorted(
+        filtered, key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+    )
+
+
+def copy_dest_path(src_path: str, out_dir: str) -> str:
+    return os.path.join(out_dir, os.path.basename(src_path))
+
+
+def validate_copy_batch(paths: list[str], out_dir: str) -> str | None:
+    if not paths:
+        return "未选择任何图片。"
+    dest_cases: set[str] = set()
+    for src in paths:
+        dest = copy_dest_path(src, out_dir)
+        dest_case = os.path.normcase(dest)
+        if dest_case in dest_cases:
+            return f"目标文件名冲突：{os.path.basename(dest)}"
+        dest_cases.add(dest_case)
+        if os.path.exists(dest):
+            return f"目标文件名已存在：{os.path.basename(dest)}"
+    return None
+
+
+def copy_one_file(src: str, dest: str) -> tuple[bool, str]:
+    src_name = os.path.basename(src)
+    dest_name = os.path.basename(dest)
+    try:
+        shutil.copy2(src, dest)
+        return True, f"{src_name} -> {dest_name}"
+    except Exception as e:
+        return False, f"{src_name} - 错误: {e}"
+
+
+def build_copy_preview(paths: list[str], out_dir: str) -> str:
+    lines = [
+        f"{os.path.basename(src)} -> {os.path.basename(copy_dest_path(src, out_dir))}"
+        for src in paths
+    ]
+    return "\n".join(lines)
+
+
+def ask_copy_confirm(parent: tk.Misc, paths: list[str], out_dir: str) -> bool:
+    """Show copy preview in a scrollable dialog; return True if user confirms."""
+    result = {"confirmed": False}
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("序号复制")
+    dialog.transient(parent)
+    dialog.resizable(True, False)
+
+    def close(confirmed: bool) -> None:
+        result["confirmed"] = confirmed
+        dialog.grab_release()
+        dialog.destroy()
+
+    dialog.protocol("WM_DELETE_WINDOW", lambda: close(False))
+
+    tk.Label(
+        dialog,
+        text="将仅复制文件名为 1、2、3… 的图片（1-1、2-2 等跳过，原文件不变）：",
+        anchor="w",
+    ).pack(fill=tk.X, padx=12, pady=(12, 4))
+
+    list_frame = tk.Frame(dialog)
+    list_frame.pack(fill=tk.X, padx=12, pady=4)
+
+    scrollbar = tk.Scrollbar(list_frame)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+    preview_box = tk.Text(
+        list_frame,
+        height=12,
+        width=52,
+        font=("Consolas", 10),
+        wrap=tk.NONE,
+        yscrollcommand=scrollbar.set,
+        state=tk.NORMAL,
+    )
+    preview_box.pack(side=tk.LEFT, fill=tk.BOTH)
+    scrollbar.config(command=preview_box.yview)
+
+    preview_box.insert(tk.END, build_copy_preview(paths, out_dir))
+    preview_box.config(state=tk.DISABLED)
+
+    btn_frame = tk.Frame(dialog, padx=12, pady=12)
+    btn_frame.pack(fill=tk.X)
+    tk.Button(btn_frame, text="继续", width=8, command=lambda: close(True)).pack(
+        side=tk.RIGHT, padx=(6, 0)
+    )
+    tk.Button(btn_frame, text="取消", width=8, command=lambda: close(False)).pack(
+        side=tk.RIGHT
+    )
+
+    dialog.update_idletasks()
+    pw = parent.winfo_width()
+    ph = parent.winfo_height()
+    px = parent.winfo_rootx()
+    py = parent.winfo_rooty()
+    dw = dialog.winfo_width()
+    dh = dialog.winfo_height()
+    dialog.geometry(f"+{px + (pw - dw) // 2}+{py + (ph - dh) // 2}")
+
+    dialog.grab_set()
+    parent.wait_window(dialog)
+    return result["confirmed"]
+
+
+def copy_images_batch(paths: list[str], out_dir: str) -> tuple[str, int, int]:
+    err = validate_copy_batch(paths, out_dir)
+    if err:
+        return err, 0, len(paths)
+
+    os.makedirs(out_dir, exist_ok=True)
+    lines: list[str] = []
+    ok = fail = 0
+    for src in paths:
+        dest = copy_dest_path(src, out_dir)
+        success, line = copy_one_file(src, dest)
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
+def build_copy_report(paths: list[str], out_dir: str) -> tuple[str, int, int]:
+    return copy_images_batch(paths, out_dir)
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -394,6 +536,9 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(0, 6)
         )
         tk.Button(bar, text="序号重命名…", command=self.on_rename_by_pattern).pack(
+            side=tk.LEFT, padx=(0, 6)
+        )
+        tk.Button(bar, text="序号复制…", command=self.on_copy_by_sequence).pack(
             side=tk.LEFT
         )
 
@@ -546,6 +691,35 @@ class App(tk.Tk):
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, report)
         messagebox.showinfo("序号重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
+
+    def on_copy_by_sequence(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要复制的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        paths = list(paths)
+        paths = filter_sequence_copy_paths(paths)
+        if not paths:
+            messagebox.showerror(
+                "序号复制",
+                "所选图片中没有纯序号文件（1、2、3…）。1-1、2-2 等不会被复制。",
+            )
+            return
+        out_dir = filedialog.askdirectory(title="选择输出文件夹")
+        if not out_dir:
+            return
+        err = validate_copy_batch(paths, out_dir)
+        if err:
+            messagebox.showerror("序号复制", err)
+            return
+        if not ask_copy_confirm(self, paths, out_dir):
+            return
+        report, ok, fail = build_copy_report(paths, out_dir)
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo("序号复制", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
 
 def main() -> None:
