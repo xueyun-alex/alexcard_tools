@@ -4,7 +4,7 @@ import sys
 import tkinter as tk
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
-from tkinter import filedialog, messagebox, scrolledtext, simpledialog
+from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
 from PIL import Image, ImageEnhance
 
@@ -506,47 +506,84 @@ def build_copy_report(paths: list[str], out_dir: str) -> tuple[str, int, int]:
     return copy_images_batch(paths, out_dir)
 
 
+def _add_tool_row(parent: tk.Widget, text: str, command, description: str) -> None:
+    block = tk.Frame(parent, padx=12, pady=8)
+    block.pack(fill=tk.X, anchor="w")
+    tk.Button(block, text=text, command=command).pack(anchor="w")
+    tk.Label(
+        block,
+        text=description,
+        anchor="w",
+        justify="left",
+        wraplength=660,
+        fg="#555555",
+        font=("", 9),
+    ).pack(anchor="w", pady=(4, 0))
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("批量图片长宽比 — 选择多张图片后查看")
+        self.title("批量图片工具")
         self.minsize(520, 360)
-        self.geometry("720x480")
+        self.geometry("720x520")
         try:
             self.iconbitmap(resource_path("monitor.ico"))
         except tk.TclError:
             pass
 
-        bar = tk.Frame(self, padx=8, pady=8)
-        bar.pack(fill=tk.X)
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill=tk.X, padx=8, pady=8)
 
-        tk.Button(bar, text="选择图片…", command=self.on_select_images).pack(
-            side=tk.LEFT, padx=(0, 6)
+        tab_aspect = tk.Frame(notebook)
+        notebook.add(tab_aspect, text="长宽比查看")
+        _add_tool_row(
+            tab_aspect,
+            "选择图片…",
+            self.on_select_images,
+            "选择多张图片，在下方报告区显示文件名、长宽比（短边=1）和像素尺寸；无法读取的文件会标注错误。",
         )
-        tk.Button(bar, text="复制全部", command=self.on_copy_all).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="转为 JPG…", command=self.on_convert_to_jpg).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="调整亮度…", command=self.on_adjust_brightness).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="批量重命名…", command=self.on_rename_images).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="序号重命名…", command=self.on_rename_by_pattern).pack(
-            side=tk.LEFT, padx=(0, 6)
-        )
-        tk.Button(bar, text="序号复制…", command=self.on_copy_by_sequence).pack(
-            side=tk.LEFT
+        _add_tool_row(
+            tab_aspect,
+            "复制全部",
+            self.on_copy_all,
+            "将报告区的全部文本复制到系统剪贴板。",
         )
 
-        hint = (
-            "每行：文件名 - 比例 (像素宽×高)。比例为短边=1、长边=倍数（横图 宽/高:1，竖图 1:高/宽）。无法读取的文件会标「错误」。"
+        tab_process = tk.Frame(notebook)
+        notebook.add(tab_process, text="图片处理")
+        _add_tool_row(
+            tab_process,
+            "转为 JPG…",
+            self.on_convert_to_jpg,
+            "选择图片和输出文件夹，将图片转换为 JPG（透明背景填充白色），并在报告区显示每张的转换结果。",
         )
-        tk.Label(self, text=hint, anchor="w", justify="left").pack(
-            fill=tk.X, padx=8, pady=(0, 4)
+        _add_tool_row(
+            tab_process,
+            "调整亮度…",
+            self.on_adjust_brightness,
+            "选择图片和输出文件夹，按倍数（0.01~10，1.0 不变）调整亮度后保存，保留原格式。",
+        )
+
+        tab_files = tk.Frame(notebook)
+        notebook.add(tab_files, text="文件管理")
+        _add_tool_row(
+            tab_files,
+            "批量重命名…",
+            self.on_rename_images,
+            "选择同文件夹下的图片，按交替规则重命名（如 1→1, 1-1, 2, 2-2…），预览确认后原地重命名。",
+        )
+        _add_tool_row(
+            tab_files,
+            "序号重命名…",
+            self.on_rename_by_pattern,
+            "选择同文件夹下的图片，按连续序号或配对序号重命名（1→1,2,3 或 1-1→1-1,2-2,3-3），预览确认后原地重命名。",
+        )
+        _add_tool_row(
+            tab_files,
+            "序号复制…",
+            self.on_copy_by_sequence,
+            "选择图片，仅复制纯数字文件名（1、2、3…，不含 1-1、2-2）到指定文件夹，预览确认后复制。",
         )
 
         self.text = scrolledtext.ScrolledText(
