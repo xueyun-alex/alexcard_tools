@@ -161,9 +161,13 @@ def build_brightness_report(
     return "\n".join(lines), ok, fail
 
 
-def rename_stem(index: int) -> str:
-    n = index // 2 + 1
+def rename_stem_alternating(index: int, start: int) -> str:
+    n = index // 2 + start
     return str(n) if index % 2 == 0 else f"{n}-{n}"
+
+
+def rename_stem(index: int) -> str:
+    return rename_stem_alternating(index, 1)
 
 
 @dataclass(frozen=True)
@@ -477,13 +481,28 @@ class App(tk.Tk):
         if not paths:
             return
         paths = list(paths)
-        err = validate_rename_batch(paths, rename_stem)
+        pattern_text = simpledialog.askstring(
+            "批量重命名",
+            "起始名称（如 1 → 1,1-1,2,2-2；3 → 3,3-3,4,4-4）：",
+            initialvalue="1",
+        )
+        if pattern_text is None:
+            return
+        pattern = parse_rename_pattern(pattern_text)
+        if pattern is None:
+            messagebox.showerror(
+                "批量重命名",
+                "起始名称无效。请输入整数（如 1）或相同数字对（如 1-1）。",
+            )
+            return
+        stem_fn = lambda i, s=pattern.start: rename_stem_alternating(i, s)
+        err = validate_rename_batch(paths, stem_fn)
         if err:
             messagebox.showerror("批量重命名", err)
             return
-        if not ask_rename_confirm(self, paths, rename_stem):
+        if not ask_rename_confirm(self, paths, stem_fn):
             return
-        report, ok, fail = build_rename_report(paths, rename_stem)
+        report, ok, fail = build_rename_report(paths, stem_fn)
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, report)
         messagebox.showinfo("批量重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
