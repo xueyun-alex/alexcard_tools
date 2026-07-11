@@ -71,6 +71,8 @@ FILE_INPUT_SELECTORS = [
     'input[type="file"]',
 ]
 RESPONSE_MARKERS = ("【标题】", "【宝贝描述】", "【标签】")
+BATCH_TXT_NAME = "文案汇总.txt"
+BATCH_SEPARATOR = "======="
 _SKIP_SELECTORS = ".HvurC, .Fsg96, .UrecDd, .FYF80, .DBd2Wb, .CxFouc"
 _EXTRACT_RESPONSE_JS = f"""el => {{
     const clone = el.cloneNode(true);
@@ -99,8 +101,18 @@ def build_search_url(prompt: str = GEMINI_STYLE_PROMPT) -> str:
     )
 
 
-def txt_path_for_image(image_path: str) -> str:
-    return os.path.splitext(image_path)[0] + ".txt"
+def batch_txt_path(image_paths: list[str]) -> str:
+    """所选图片公共父目录下的 文案汇总.txt；跨盘符时退回第一张图所在目录。"""
+    if not image_paths:
+        raise ValueError("image_paths 为空")
+    dirs = [os.path.dirname(os.path.abspath(p)) for p in image_paths]
+    try:
+        common = os.path.commonpath(dirs)
+    except ValueError:
+        common = dirs[0]
+    if not os.path.isdir(common):
+        common = dirs[0]
+    return os.path.join(common, BATCH_TXT_NAME)
 
 
 def _section_body(text: str, label: str, next_labels: tuple[str, ...]) -> str | None:
@@ -161,9 +173,10 @@ def format_copy_document(parsed: ParsedCopy) -> str:
     )
 
 
-def write_copy_txt(image_path: str, parsed: ParsedCopy) -> str:
-    dest = txt_path_for_image(image_path)
-    content = format_copy_document(parsed)
+def write_batch_copy_txt(dest: str, documents: list[str]) -> str:
+    """将多条文案用 ======= 拼成一个文件并覆盖写入。"""
+    parts = [d.replace("\r\n", "\n").replace("\r", "\n").strip() for d in documents]
+    content = f"\n{BATCH_SEPARATOR}\n".join(parts) + "\n"
     with open(dest, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
     return dest
@@ -564,28 +577,10 @@ def _wait_for_copy_ready(
     raise TimeoutError("超时未生成")
 
 
-def write_raw_txt(image_path: str, raw: str) -> str:
-    dest = txt_path_for_image(image_path)
-    with open(dest, "w", encoding="utf-8", newline="\n") as f:
-        f.write(raw.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n")
-    return dest
-
-
-def save_reply_txt(image_path: str, raw: str) -> tuple[str, bool]:
-    """
-    写入与图片同名的 txt。
-    返回 (路径, formatted)：formatted=True 表示按三段规范化写入。
-    """
-    try:
-        parsed = parse_gemini_copy(raw)
-        return write_copy_txt(image_path, parsed), True
-    except ValueError:
-        return write_raw_txt(image_path, raw), False
-
-
-def process_one_image(page, image_path: str, prompt: str = GEMINI_STYLE_PROMPT) -> str:
-    """填提示词 → 剪贴板粘贴图片 → 等发送可用 → 发送 → 写 txt。"""
-    name = os.path.basename(image_path)
+def process_one_image(
+    page, image_path: str, prompt: str = GEMINI_STYLE_PROMPT
+) -> ParsedCopy:
+    """填提示词 → 剪贴板粘贴图片 → 等发送可用 → 发送 → 解析三段。不写文件。"""
     _ensure_on_chat(page)
 
     previous = ""
@@ -594,7 +589,6 @@ def process_one_image(page, image_path: str, prompt: str = GEMINI_STYLE_PROMPT) 
     except Exception:
         previous = ""
 
-    # 先把图放进剪贴板，再填提示词并粘贴
     try:
         _copy_image_to_clipboard(image_path)
     except Exception as e:
@@ -610,17 +604,13 @@ def process_one_image(page, image_path: str, prompt: str = GEMINI_STYLE_PROMPT) 
     _click_send(page)
 
     raw = _wait_for_copy_ready(page, previous=previous)
-    dest, formatted = save_reply_txt(image_path, raw)
-    base = os.path.basename(dest)
-    if formatted:
-        return f"{name} - 已保存 {base}"
-    return f"{name} - 已保存（原文）{base}"
+    return parse_gemini_copy(raw)
 
 
 ProgressCallback = Callable[[str], None]
 DoneCallback = Callable[[], None]
 ErrorCallback = Callable[[str], None]
-BatchDoneCallback = Callable[[list[str], int, int], None]
+BatchDoneCallback = Callable[[list[str], int, int, str | None], None]
 
 
 def _is_missing_browser_error(exc: BaseException) -> bool:
@@ -752,9 +742,11 @@ class GeminiBrowserSession:
                 elif cmd == "batch":
                     _, paths, prompt, on_progress, on_done, on_error = item
                     try:
-                        lines, ok, fail = self._do_batch(paths, prompt, on_progress)
+                        lines, ok, fail, dest = self._do_batch(
+                            paths, prompt, on_progress
+                        )
                         if on_done:
-                            on_done(lines, ok, fail)
+                            on_done(lines, ok, fail, dest)
                     except Exception as e:
                         if on_error:
                             on_error(str(e))
@@ -821,7 +813,7 @@ class GeminiBrowserSession:
         image_paths: list[str],
         prompt: str,
         on_progress: ProgressCallback | None,
-    ) -> tuple[list[str], int, int]:
+    ) -> tuple[list[str], int, int, str | None]:
         def emit(line: str) -> None:
             if on_progress:
                 on_progress(line)
@@ -832,12 +824,15 @@ class GeminiBrowserSession:
 
         assert self._page is not None
         lines: list[str] = []
+        documents: list[str] = []
         ok = fail = 0
         for path in image_paths:
             name = os.path.basename(path)
             try:
-                line = process_one_image(self._page, path, prompt)
+                parsed = process_one_image(self._page, path, prompt)
+                documents.append(format_copy_document(parsed))
                 ok += 1
+                line = f"{name} - 已解析"
                 lines.append(line)
                 emit(line)
             except TimeoutError:
@@ -850,7 +845,20 @@ class GeminiBrowserSession:
                 line = f"{name} - 错误: {e}"
                 lines.append(line)
                 emit(line)
-        return lines, ok, fail
+
+        dest: str | None = None
+        if documents:
+            dest = batch_txt_path(image_paths)
+            write_batch_copy_txt(dest, documents)
+            summary = f"已写入 {os.path.basename(dest)}（{len(documents)} 条）→ {dest}"
+            lines.append(summary)
+            emit(summary)
+        else:
+            msg = "无成功文案可保存"
+            lines.append(msg)
+            emit(msg)
+
+        return lines, ok, fail, dest
 
     def _do_close(self) -> None:
         if self._context is not None:

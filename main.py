@@ -600,7 +600,8 @@ class App(tk.Tk):
             tab_xianyu,
             "批量获取文案…",
             self.on_gemini_batch,
-            "弹出对话框输入提示词并选择图片，确定后依次发送给 Gemini，回复保存为与图片同目录同名的 .txt。",
+            "弹出对话框输入提示词并选择图片，确定后依次发送给 Gemini；"
+            "结果合并保存为所选图片目录下的 文案汇总.txt（仅【标题】【宝贝描述】【标签】，多条用 ======= 分隔）。",
         )
 
         self._gemini_busy = False
@@ -836,15 +837,17 @@ class App(tk.Tk):
         def on_progress(line: str) -> None:
             self.after(0, lambda l=line: self._append_report_line(l))
 
-        def on_done(lines: list[str], ok: int, fail: int) -> None:
+        def on_done(lines: list[str], ok: int, fail: int, dest: str | None) -> None:
             def finish() -> None:
                 self._gemini_busy = False
                 if not lines:
                     self._append_report_line("没有处理结果。")
-                messagebox.showinfo(
-                    "批量获取文案",
-                    f"完成：成功 {ok} 张，失败 {fail} 张。",
-                )
+                detail = f"完成：成功 {ok} 张，失败 {fail} 张。"
+                if dest:
+                    detail += f"\n已写入：{dest}"
+                elif ok == 0:
+                    detail += "\n无成功文案可保存。"
+                messagebox.showinfo("批量获取文案", detail)
 
             self.after(0, finish)
 
