@@ -1,1 +1,2 @@
 pillow>=10,<12
+playwright>=1.40,<2
