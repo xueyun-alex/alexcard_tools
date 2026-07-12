@@ -669,7 +669,8 @@ def _launch_persistent_context(p, user_data: str, headless: bool):
     return p.chromium.launch_persistent_context(
         user_data,
         headless=headless,
-        viewport={"width": 1280, "height": 900},
+        # None：随窗口大小自适应，有头模式下可用滚轮正常滚动页面
+        viewport=None,
         accept_downloads=True,
         args=["--disable-blink-features=AutomationControlled"],
     )
