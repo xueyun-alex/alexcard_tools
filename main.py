@@ -767,7 +767,7 @@ class App(tk.Tk):
         self.minsize(520, 360)
         self.geometry("720x520")
         try:
-            self.iconbitmap(resource_path("monitor.ico"))
+            self.iconbitmap(resource_path("draw.ico"))
         except tk.TclError:
             pass
 

@@ -10,6 +10,7 @@ set "PY=py -3.12"
 echo 使用解释器: %PY%
 %PY% -m pip install -r requirements.txt -q
 %PY% -m pip install -r requirements-build.txt -q
+%PY% -m playwright install chromium
 
 %PY% -m PyInstaller --noconfirm --clean ImgAspectRatio.spec
 if errorlevel 1 (
@@ -17,5 +18,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo 已生成: %CD%\dist\alexcard_tools-1.2.0.exe
+echo 已生成: %CD%\dist\alexcard_tools-1.3.0.exe
 pause

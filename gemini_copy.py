@@ -4,11 +4,24 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import quote
+
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False)) or hasattr(sys, "_MEIPASS")
+
+
+def app_dir() -> str:
+    """可写的应用根目录：源码旁，或打包后的 exe 所在目录。"""
+    if _is_frozen():
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
 
 # 固定风格提示词（来自用户提供的 Google 搜索 q= 示例，去掉会话参数）
 GEMINI_STYLE_PROMPT = (
@@ -89,7 +102,7 @@ class ParsedCopy:
 
 
 def profile_dir(base_dir: str | None = None) -> str:
-    root = base_dir or os.path.dirname(os.path.abspath(__file__))
+    root = base_dir or app_dir()
     return os.path.join(root, PROFILE_DIR_NAME)
 
 
@@ -622,57 +635,126 @@ def _is_missing_browser_error(exc: BaseException) -> bool:
     )
 
 
-def ensure_chromium_installed(on_progress: ProgressCallback | None = None) -> None:
-    """若本机缺少 Playwright Chromium，则自动执行 install。"""
-    import subprocess
-    import sys
+def _manual_chromium_hint() -> str:
+    """打包后 sys.executable 是 exe，不能再用它跑 -m playwright。"""
+    return "python -m playwright install chromium"
 
+
+def _browsers_dir() -> str:
+    """浏览器下载目录固定到 exe/项目旁，便于打包环境读写。"""
+    path = os.path.join(app_dir(), ".playwright-browsers")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _prepare_browsers_env() -> None:
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = _browsers_dir()
+
+
+def _chromium_install_command() -> list[str]:
+    """通过 Playwright 自带 node/cli 安装浏览器，避免冻结 exe 被当成 Python。"""
+    from playwright._impl._driver import compute_driver_executable
+
+    node, cli = compute_driver_executable()
+    return [node, cli, "install", "chromium"]
+
+
+def _system_browser_channels() -> tuple[str, ...]:
+    """Windows 优先用本机 Edge/Chrome，打包 exe 无需再下 Playwright Chromium。"""
+    if sys.platform == "win32":
+        return ("msedge", "chrome")
+    return ("chrome", "msedge")
+
+
+def ensure_chromium_installed(on_progress: ProgressCallback | None = None) -> None:
+    """
+    确保能启动浏览器。
+    优先依赖系统 Edge/Chrome；仅在都不可用时才安装 Playwright Chromium。
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as e:
         raise RuntimeError(
-            "未安装 playwright。请执行: pip install playwright && python -m playwright install chromium"
+            "未安装 playwright。请执行: pip install playwright && "
+            + _manual_chromium_hint()
         ) from e
 
+    _prepare_browsers_env()
+
+    # 系统浏览器可用则无需安装 Chromium
     with sync_playwright() as p:
+        for channel in _system_browser_channels():
+            try:
+                browser = p.chromium.launch(channel=channel, headless=True)
+                browser.close()
+                return
+            except Exception:
+                continue
+
         exe = p.chromium.executable_path
         if os.path.exists(exe):
             return
 
     if on_progress:
-        on_progress("正在自动安装 Chromium，请稍候…")
-    env = os.environ.copy()
-    env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
-    result = subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        capture_output=True,
-        text=True,
-        env=env,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip()
+        on_progress("未检测到本机 Edge/Chrome，正在安装 Chromium，请稍候…")
+
+    from playwright._impl._driver import get_driver_env
+
+    env = get_driver_env()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = _browsers_dir()
+    try:
+        cmd = _chromium_install_command()
+    except Exception as e:
         raise RuntimeError(
-            "自动安装 Chromium 失败。请手动执行: "
-            f"{sys.executable} -m playwright install chromium"
+            "无法定位 Playwright 驱动。请安装 Microsoft Edge 或 Google Chrome，"
+            "或手动执行: " + _manual_chromium_hint()
+        ) from e
+
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
+    detail = (result.stderr or result.stdout or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(
+            "自动安装 Chromium 失败。请安装 Microsoft Edge / Google Chrome，"
+            "或手动执行: "
+            + _manual_chromium_hint()
             + (f"\n{detail}" if detail else "")
         )
 
+    _prepare_browsers_env()
     with sync_playwright() as p:
         if not os.path.exists(p.chromium.executable_path):
             raise RuntimeError(
-                "Chromium 安装后仍不可用。请手动执行: "
-                f"{sys.executable} -m playwright install chromium"
+                "Chromium 安装后仍不可用。请安装 Microsoft Edge / Google Chrome，"
+                "或手动执行: "
+                + _manual_chromium_hint()
+                + (f"\n{detail}" if detail else "")
             )
 
 
 def _launch_persistent_context(p, user_data: str, headless: bool):
-    return p.chromium.launch_persistent_context(
-        user_data,
-        headless=headless,
+    """优先 channel=本机 Edge/Chrome；都失败再退回 Playwright Chromium。"""
+    _prepare_browsers_env()
+    common = {
+        "headless": headless,
         # None：随窗口大小自适应，有头模式下可用滚轮正常滚动页面
-        viewport=None,
-        accept_downloads=True,
-        args=["--disable-blink-features=AutomationControlled"],
+        "viewport": None,
+        "accept_downloads": True,
+        "args": ["--disable-blink-features=AutomationControlled"],
+    }
+    errors: list[str] = []
+    for channel in (*_system_browser_channels(), None):
+        kwargs = dict(common)
+        if channel:
+            kwargs["channel"] = channel
+        try:
+            return p.chromium.launch_persistent_context(user_data, **kwargs)
+        except Exception as e:
+            label = channel or "chromium"
+            errors.append(f"{label}: {e}")
+            continue
+    raise RuntimeError(
+        "无法启动浏览器（已尝试 Edge / Chrome / Chromium）。\n"
+        + "\n".join(errors)
     )
 
 

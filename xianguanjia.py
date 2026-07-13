@@ -12,6 +12,7 @@ from typing import Callable
 from gemini_copy import (
     _is_missing_browser_error,
     _launch_persistent_context,
+    app_dir,
     ensure_chromium_installed,
 )
 
@@ -49,7 +50,7 @@ class BatchPublishJob:
 
 
 def profile_dir(base_dir: str | None = None) -> str:
-    root = base_dir or os.path.dirname(os.path.abspath(__file__))
+    root = base_dir or app_dir()
     return os.path.join(root, PROFILE_DIR_NAME)
 
 

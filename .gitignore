@@ -1,5 +1,6 @@
 .playwright-gemini-profile/
 .playwright-xianguanjia-profile/
+.playwright-browsers/
 .batch_publish_last.json
 __pycache__/
 *.pyc
