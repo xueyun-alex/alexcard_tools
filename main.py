@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Iterable, Literal
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageTk
 
 from gemini_copy import (
     BATCH_SEPARATOR,
@@ -399,6 +399,273 @@ def build_brightness_report(
         else:
             fail += 1
     return "\n".join(lines), ok, fail
+
+
+PosterBox = tuple[int, int, int, int]  # left, top, right, bottom
+
+
+def fit_cover(im: Image.Image, box_w: int, box_h: int) -> Image.Image:
+    """等比放大后居中裁切，铺满目标尺寸。"""
+    if box_w <= 0 or box_h <= 0:
+        raise ValueError("框尺寸无效")
+    src_w, src_h = im.size
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError("源图尺寸无效")
+    scale = max(box_w / src_w, box_h / src_h)
+    new_w = max(1, round(src_w * scale))
+    new_h = max(1, round(src_h * scale))
+    resized = im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    left = max(0, (new_w - box_w) // 2)
+    top = max(0, (new_h - box_h) // 2)
+    return resized.crop((left, top, left + box_w, top + box_h))
+
+
+def paste_into_poster(
+    poster: Image.Image, img: Image.Image, box: PosterBox
+) -> None:
+    left, top, right, bottom = box
+    fitted = fit_cover(img, right - left, bottom - top)
+    if fitted.mode == "P":
+        fitted = fitted.convert("RGBA")
+    if fitted.mode in ("RGBA", "LA"):
+        rgba = fitted.convert("RGBA")
+        poster.paste(rgba, (left, top), rgba)
+    else:
+        if fitted.mode != poster.mode and poster.mode in ("RGB", "RGBA", "L"):
+            fitted = fitted.convert(poster.mode)
+        poster.paste(fitted, (left, top))
+
+
+def poster_compose_output_path(poster_path: str, index: int) -> str:
+    directory = os.path.dirname(os.path.abspath(poster_path))
+    stem, ext = os.path.splitext(os.path.basename(poster_path))
+    return os.path.join(directory, f"{stem}_{index}{ext}")
+
+
+def compose_poster_pair(
+    poster_path: str,
+    img1_path: str,
+    img2_path: str,
+    box1: PosterBox,
+    box2: PosterBox,
+    dest_path: str,
+) -> tuple[bool, str]:
+    label = (
+        f"{os.path.basename(img1_path)} + {os.path.basename(img2_path)}"
+        f" → {os.path.basename(dest_path)}"
+    )
+    try:
+        with Image.open(poster_path) as base:
+            poster = base.copy()
+        ext = os.path.splitext(poster_path)[1].lower()
+        if ext in (".jpg", ".jpeg"):
+            poster = prepare_for_jpeg(poster)
+        with Image.open(img1_path) as im1:
+            paste_into_poster(poster, im1.copy(), box1)
+        with Image.open(img2_path) as im2:
+            paste_into_poster(poster, im2.copy(), box2)
+        if ext in (".jpg", ".jpeg") and poster.mode != "RGB":
+            poster = prepare_for_jpeg(poster)
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        save_image(poster, dest_path, poster_path)
+        w, h = poster.size
+        return True, f"{label} - 已保存 ({w}×{h})"
+    except Exception as e:
+        return False, f"{label} - 错误: {e}"
+
+
+def build_poster_compose_report(
+    poster_path: str,
+    pairs: list[tuple[str, ...]],
+    box1: PosterBox,
+    box2: PosterBox,
+) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for i, pair in enumerate(pairs, start=1):
+        if len(pair) < 2:
+            lines.append(f"第 {i} 组 - 错误: 图片不足两张，已跳过")
+            fail += 1
+            continue
+        dest = poster_compose_output_path(poster_path, i)
+        success, line = compose_poster_pair(
+            poster_path, pair[0], pair[1], box1, box2, dest
+        )
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
+def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
+    return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+
+
+def ask_poster_regions(
+    parent: tk.Tk, poster_path: str
+) -> tuple[PosterBox, PosterBox] | None:
+    """弹出预览，依次拖出两个矩形；确认后返回原图像素坐标，取消返回 None。"""
+    try:
+        with Image.open(poster_path) as im:
+            original = im.convert("RGBA") if im.mode == "P" else im.copy()
+            orig_w, orig_h = original.size
+    except Exception as e:
+        messagebox.showerror("海报双图贴入", f"无法打开海报：{e}", parent=parent)
+        return None
+
+    max_side = 900
+    scale = min(1.0, max_side / max(orig_w, orig_h))
+    disp_w = max(1, int(round(orig_w * scale)))
+    disp_h = max(1, int(round(orig_h * scale)))
+    display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("框选海报两个位置")
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.resizable(True, True)
+
+    hint = tk.StringVar(value="请拖拽框选位置 1，完成后点击「确认本框」")
+    top_row = tk.Frame(dialog)
+    top_row.pack(fill=tk.X, padx=12, pady=(12, 4))
+    tk.Label(top_row, textvariable=hint, anchor="w").pack(
+        side=tk.LEFT, fill=tk.X, expand=True
+    )
+    confirm_btn = tk.Button(top_row, text="确认本框")
+    confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+    canvas = tk.Canvas(
+        dialog, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair"
+    )
+    canvas.pack(padx=12, pady=4)
+
+    photo = ImageTk.PhotoImage(display, master=dialog)
+    canvas.create_image(0, 0, anchor="nw", image=photo)
+    canvas.image = photo  # type: ignore[attr-defined]
+
+    state: dict = {
+        "step": 1,
+        "boxes_disp": [],
+        "drag_start": None,
+        "temp_id": None,
+        "box_ids": [],
+        "result": None,
+    }
+
+    def canvas_to_orig(box: PosterBox) -> PosterBox:
+        l, t, r, b = box
+        return (
+            max(0, min(orig_w, int(round(l / scale)))),
+            max(0, min(orig_h, int(round(t / scale)))),
+            max(0, min(orig_w, int(round(r / scale)))),
+            max(0, min(orig_h, int(round(b / scale)))),
+        )
+
+    def on_press(event: tk.Event) -> None:
+        if state["step"] > 2:
+            return
+        state["drag_start"] = (event.x, event.y)
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+
+    def on_drag(event: tk.Event) -> None:
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+        state["temp_id"] = canvas.create_rectangle(
+            x0, y0, event.x, event.y, outline="#e53935", width=2
+        )
+
+    def on_release(event: tk.Event) -> None:
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        state["drag_start"] = None
+        box = normalize_poster_box(x0, y0, event.x, event.y)
+        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+            if state["temp_id"] is not None:
+                canvas.delete(state["temp_id"])
+                state["temp_id"] = None
+            return
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+        # replace unfinished rect for current step
+        while len(state["boxes_disp"]) >= state["step"]:
+            state["boxes_disp"].pop()
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+        color = "#1e88e5" if state["step"] == 1 else "#43a047"
+        rid = canvas.create_rectangle(*box, outline=color, width=2)
+        state["boxes_disp"].append(box)
+        state["box_ids"].append(rid)
+
+    def confirm_box() -> None:
+        if len(state["boxes_disp"]) < state["step"]:
+            messagebox.showwarning(
+                "框选海报两个位置",
+                f"请先框选位置 {state['step']}。",
+                parent=dialog,
+            )
+            return
+        if state["step"] == 1:
+            state["step"] = 2
+            hint.set("请拖拽框选位置 2，完成后点击「确认本框」")
+        else:
+            b1 = canvas_to_orig(state["boxes_disp"][0])
+            b2 = canvas_to_orig(state["boxes_disp"][1])
+            if b1[2] - b1[0] < 2 or b1[3] - b1[1] < 2:
+                messagebox.showwarning(
+                    "框选海报两个位置", "位置 1 映射后过小，请重新框选。", parent=dialog
+                )
+                return
+            if b2[2] - b2[0] < 2 or b2[3] - b2[1] < 2:
+                messagebox.showwarning(
+                    "框选海报两个位置", "位置 2 映射后过小，请重新框选。", parent=dialog
+                )
+                return
+            state["result"] = (b1, b2)
+            dialog.destroy()
+
+    def undo_current() -> None:
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+        if len(state["boxes_disp"]) >= state["step"] and state["box_ids"]:
+            canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+        elif state["step"] == 2 and state["boxes_disp"]:
+            state["step"] = 1
+            hint.set("请拖拽框选位置 1，完成后点击「确认本框」")
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+
+    def on_cancel() -> None:
+        state["result"] = None
+        dialog.destroy()
+
+    canvas.bind("<ButtonPress-1>", on_press)
+    canvas.bind("<B1-Motion>", on_drag)
+    canvas.bind("<ButtonRelease-1>", on_release)
+
+    confirm_btn.configure(command=confirm_box)
+
+    btn_row = tk.Frame(dialog)
+    btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
+    tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
+    tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    parent.wait_window(dialog)
+    return state["result"]
 
 
 def rename_stem_alternating(index: int, start: int) -> str:
@@ -803,6 +1070,13 @@ class App(tk.Tk):
             self.on_adjust_brightness,
             "选择图片和输出文件夹，按倍数（0.01~10，1.0 不变）调整亮度后保存，保留原格式。",
         )
+        _add_tool_row(
+            tab_process,
+            "海报双图贴入…",
+            self.on_poster_compose,
+            "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
+            "按组生成新海报，保存在原海报同目录（命名为 海报名_1、海报名_2…）。",
+        )
 
         tab_files = tk.Frame(notebook)
         notebook.add(tab_files, text="文件管理")
@@ -930,6 +1204,61 @@ class App(tk.Tk):
         self.text.delete("1.0", tk.END)
         self.text.insert(tk.END, report)
         messagebox.showinfo("调整亮度", f"完成：成功 {ok} 张，失败 {fail} 张。")
+
+    def on_poster_compose(self) -> None:
+        poster_path = filedialog.askopenfilename(
+            title="选择海报模板",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not poster_path:
+            return
+        regions = ask_poster_regions(self, poster_path)
+        if regions is None:
+            return
+        box1, box2 = regions
+
+        use_dir = messagebox.askyesno(
+            "海报双图贴入",
+            "是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
+        )
+        if use_dir:
+            image_dir = filedialog.askdirectory(title="选择图片文件夹")
+            if not image_dir:
+                return
+            paths = list_images_in_dir(image_dir)
+        else:
+            paths = list(
+                filedialog.askopenfilenames(
+                    title="选择要贴入的图片（主图 1/2/3… 与副图 1-1/2-2…）",
+                    filetypes=IMAGE_FILETYPES,
+                )
+            )
+            if not paths:
+                return
+
+        pairs = upload_pairs(paths)
+        if isinstance(pairs, str):
+            messagebox.showerror("海报双图贴入", pairs)
+            return
+        incomplete = [i for i, p in enumerate(pairs, start=1) if len(p) < 2]
+        if incomplete:
+            messagebox.showerror(
+                "海报双图贴入",
+                f"存在不完整的组（第 {incomplete[0]} 组等），每组须恰好 2 张图。",
+            )
+            return
+        if not pairs:
+            messagebox.showerror("海报双图贴入", "未找到可配对的图片。")
+            return
+
+        report, ok, fail = build_poster_compose_report(
+            poster_path, pairs, box1, box2
+        )
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo(
+            "海报双图贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
+        )
 
     def on_rename_images(self) -> None:
         paths = filedialog.askopenfilenames(
