@@ -9,6 +9,7 @@ from PIL import Image, ImageEnhance, ImageTk
 
 from .common import (
     IMAGE_FILETYPES,
+    ScrollableTab,
     _add_tool_row,
     _image_stem,
     _is_main_image_stem,
@@ -739,43 +740,43 @@ def ask_poster_regions_multi(
     return state["result"]
 
 
-class ProcessTab(tk.Frame):
+class ProcessTab(ScrollableTab):
     def __init__(self, notebook: tk.Widget, app) -> None:
         super().__init__(notebook)
         self.app = app
         _add_tool_row(
-            self,
+            self.body,
+            "组合贴入…",
+            self.on_poster_combined,
+            "选择海报后先框选双图两处位置，再框选多处位置（至少 2 处）；"
+            "主图（1、2、3…）贴入位置1及全部多选位置，副图（1-1、2-2…）贴入位置2；"
+            "每组生成一张海报，保存在原海报同目录（命名为 poster_x.png，x 为主图文件名）。",
+        )
+        _add_tool_row(
+            self.body,
             "转为 JPG…",
             self.on_convert_to_jpg,
             "选择图片和输出文件夹，将图片转换为 JPG（透明背景填充白色），并在报告区显示每张的转换结果。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "调整亮度…",
             self.on_adjust_brightness,
             "选择图片和输出文件夹，按倍数（0.01~10，1.0 不变）调整亮度后保存，保留原格式。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "海报双图贴入…",
             self.on_poster_compose,
             "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
             "按组生成新海报，保存在原海报同目录（命名为 poster_x.png，x 为该组第一张图的文件名）。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "单图多次贴入…",
             self.on_poster_single_multi,
             "选择海报并框选多处位置；每张图（1、2、3…）贴入全部位置，各生成一张海报，"
             "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
-        )
-        _add_tool_row(
-            self,
-            "组合贴入…",
-            self.on_poster_combined,
-            "选择海报后先框选双图两处位置，再框选多处位置（至少 2 处）；"
-            "主图（1、2、3…）贴入位置1及全部多选位置，副图（1-1、2-2…）贴入位置2；"
-            "每组生成一张海报，保存在原海报同目录（命名为 poster_x.png，x 为主图文件名）。",
         )
 
     def on_convert_to_jpg(self) -> None:

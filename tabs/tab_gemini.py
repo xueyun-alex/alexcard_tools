@@ -6,7 +6,7 @@ from tkinter import filedialog, messagebox, scrolledtext
 
 from gemini_copy import GEMINI_STYLE_PROMPT, get_gemini_session
 
-from .common import IMAGE_FILETYPES, _add_tool_row
+from .common import IMAGE_FILETYPES, ScrollableTab, _add_tool_row
 
 
 def ask_gemini_batch_dialog(
@@ -86,20 +86,20 @@ def ask_gemini_batch_dialog(
     return str(result["prompt"]), list(result["paths"])  # type: ignore[arg-type]
 
 
-class GeminiTab(tk.Frame):
+class GeminiTab(ScrollableTab):
     def __init__(self, notebook: tk.Widget, app) -> None:
         super().__init__(notebook)
         self.app = app
         self._busy = False
         self._session = get_gemini_session()
         _add_tool_row(
-            self,
+            self.body,
             "打开 Gemini",
             self.on_open_gemini,
             "打开 Google AI Mode 网页，请先在此窗口登录；登录后勿关浏览器，再点「批量获取文案」。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "批量获取文案…",
             self.on_gemini_batch,
             "弹出对话框输入提示词并选择图片，确定后依次发送给 Gemini；"

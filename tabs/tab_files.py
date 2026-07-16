@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Callable, Literal
 from tkinter import filedialog, messagebox, simpledialog
 
-from .common import IMAGE_FILETYPES, _add_tool_row
+from .common import IMAGE_FILETYPES, ScrollableTab, _add_tool_row
 
 
 def rename_stem_alternating(index: int, start: int) -> str:
@@ -354,24 +354,24 @@ def build_copy_report(paths: list[str], out_dir: str) -> tuple[str, int, int]:
     return copy_images_batch(paths, out_dir)
 
 
-class FilesTab(tk.Frame):
+class FilesTab(ScrollableTab):
     def __init__(self, notebook: tk.Widget, app) -> None:
         super().__init__(notebook)
         self.app = app
         _add_tool_row(
-            self,
+            self.body,
             "批量重命名…",
             self.on_rename_images,
             "选择同文件夹下的图片，按交替规则重命名（如 1→1, 1-1, 2, 2-2…），预览确认后原地重命名。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "序号重命名…",
             self.on_rename_by_pattern,
             "选择同文件夹下的图片，按连续序号或配对序号重命名（1→1,2,3 或 1-1→1-1,2-2,3-3），预览确认后原地重命名。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "序号复制…",
             self.on_copy_by_sequence,
             "选择图片，仅复制纯数字文件名（1、2、3…，不含 1-1、2-2）到指定文件夹，预览确认后复制。",

@@ -111,8 +111,43 @@ def prepare_for_jpeg(im: Image.Image) -> Image.Image:
     return im
 
 
+# 按钮区固定高度（像素），超出部分通过滚动查看，给下方日志区留出更多空间
+TAB_BODY_HEIGHT = 150
+
+
+class ScrollableTab(tk.Frame):
+    """按钮区固定高度、可上下滚动的 Tab 基类，工具行加到 self.body。"""
+
+    def __init__(self, notebook: tk.Widget) -> None:
+        super().__init__(notebook)
+        canvas = tk.Canvas(self, height=TAB_BODY_HEIGHT, highlightthickness=0)
+        scrollbar = tk.Scrollbar(self, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self.body = tk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=self.body, anchor="nw")
+
+        def on_body_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def on_canvas_configure(event) -> None:
+            canvas.itemconfigure(window, width=event.width)
+
+        self.body.bind("<Configure>", on_body_configure)
+        canvas.bind("<Configure>", on_canvas_configure)
+
+        def on_mousewheel(event) -> None:
+            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+        # 指针进入按钮区时接管滚轮，离开时归还（避免影响下方日志区滚动）
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+
+
 def _add_tool_row(parent: tk.Widget, text: str, command, description: str) -> None:
-    block = tk.Frame(parent, padx=12, pady=8)
+    block = tk.Frame(parent, padx=12, pady=6)
     block.pack(fill=tk.X, anchor="w")
     tk.Button(block, text=text, command=command).pack(anchor="w")
     tk.Label(

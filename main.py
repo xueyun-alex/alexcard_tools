@@ -15,16 +15,18 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ALEXCARD工具集")
-        self.minsize(520, 360)
-        self.geometry("720x520")
+        self.minsize(520, 400)
+        self.geometry("720x640")
         try:
             self.iconbitmap(resource_path("draw.ico"))
         except tk.TclError:
             pass
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.X, padx=8, pady=8)
+        # 竖向分隔面板：上为 Tab 按钮区、下为日志区，拖动分隔条可调高度
+        paned = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        paned.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
+        notebook = ttk.Notebook(paned)
         notebook.add(AspectTab(notebook, self), text="长宽比查看")
         notebook.add(ProcessTab(notebook, self), text="图片处理")
         notebook.add(FilesTab(notebook, self), text="文件管理")
@@ -32,12 +34,13 @@ class App(tk.Tk):
         notebook.add(self._gemini_tab, text="gmini自动获取文案")
         self._xg_tab = XianguanjiaTab(notebook, self)
         notebook.add(self._xg_tab, text="闲管家上线")
+        paned.add(notebook, weight=0)
 
         self.protocol("WM_DELETE_WINDOW", self._on_app_close)
         self.text = scrolledtext.ScrolledText(
-            self, wrap=tk.NONE, font=("Consolas", 10), undo=True
+            paned, wrap=tk.NONE, font=("Consolas", 10), undo=True
         )
-        self.text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        paned.add(self.text, weight=1)
 
     def append_report_line(self, line: str) -> None:
         self.text.insert(tk.END, line + "\n")

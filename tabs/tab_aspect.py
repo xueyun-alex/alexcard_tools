@@ -7,7 +7,7 @@ from tkinter import filedialog, messagebox
 
 from PIL import Image
 
-from .common import IMAGE_FILETYPES, _add_tool_row, _trim_float
+from .common import IMAGE_FILETYPES, ScrollableTab, _add_tool_row, _trim_float
 
 
 def aspect_ratio_text(width: int, height: int) -> str:
@@ -37,18 +37,18 @@ def build_report(paths: Iterable[str]) -> str:
     return "\n".join(lines)
 
 
-class AspectTab(tk.Frame):
+class AspectTab(ScrollableTab):
     def __init__(self, notebook: tk.Widget, app) -> None:
         super().__init__(notebook)
         self.app = app
         _add_tool_row(
-            self,
+            self.body,
             "选择图片…",
             self.on_select_images,
             "选择多张图片，在下方报告区显示文件名、长宽比（短边=1）和像素尺寸；无法读取的文件会标注错误。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "复制全部",
             self.on_copy_all,
             "将报告区的全部文本复制到系统剪贴板。",

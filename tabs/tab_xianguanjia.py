@@ -24,6 +24,7 @@ from .common import (
     IMAGE_FILETYPES,
     PROJECT_ROOT,
     TEXT_FILETYPES,
+    ScrollableTab,
     _add_tool_row,
     _image_stem,
     _is_main_image_stem,
@@ -446,20 +447,20 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
     return result["params"]  # type: ignore[return-value]
 
 
-class XianguanjiaTab(tk.Frame):
+class XianguanjiaTab(ScrollableTab):
     def __init__(self, notebook: tk.Widget, app) -> None:
         super().__init__(notebook)
         self.app = app
         self._busy = False
         self._session = get_xianguanjia_session()
         _add_tool_row(
-            self,
+            self.body,
             "打开闲管家",
             self.on_open_xianguanjia,
             "打开闲管家登录页，请在弹出浏览器中登录；登录后勿关浏览器。",
         )
         _add_tool_row(
-            self,
+            self.body,
             "批量上线…",
             self.on_batch_publish,
             "填写分类/商品规格/规格名称/运费，选择图片文件夹与文案 txt；"
