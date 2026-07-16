@@ -568,6 +568,72 @@ def build_poster_single_multi_report(
     return "\n".join(lines), ok, fail
 
 
+def compose_poster_combined(
+    poster_path: str,
+    img1_path: str,
+    img2_path: str,
+    box1: PosterBox,
+    box2: PosterBox,
+    multi_boxes: list[PosterBox],
+    dest_path: str,
+) -> tuple[bool, str]:
+    """主图贴入 box1 与全部 multi_boxes，副图贴入 box2，输出一张海报。"""
+    label = (
+        f"{os.path.basename(img1_path)} + {os.path.basename(img2_path)}"
+        f"（主图另贴 {len(multi_boxes)} 处）"
+        f" → {os.path.basename(dest_path)}"
+    )
+    try:
+        with Image.open(poster_path) as base:
+            poster = base.copy()
+        if os.path.splitext(poster_path)[1].lower() in (".jpg", ".jpeg"):
+            poster = prepare_for_jpeg(poster)
+        with Image.open(img1_path) as im1:
+            img1 = im1.copy()
+            paste_into_poster(poster, img1, box1)
+            for box in multi_boxes:
+                paste_into_poster(poster, img1, box)
+        with Image.open(img2_path) as im2:
+            paste_into_poster(poster, im2.copy(), box2)
+        if poster.mode not in ("RGB", "RGBA"):
+            if poster.mode in ("LA", "P"):
+                poster = poster.convert("RGBA")
+            else:
+                poster = poster.convert("RGB")
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        poster.save(dest_path, "PNG")
+        w, h = poster.size
+        return True, f"{label} - 已保存 ({w}×{h})"
+    except Exception as e:
+        return False, f"{label} - 错误: {e}"
+
+
+def build_poster_combined_report(
+    poster_path: str,
+    pairs: list[tuple[str, ...]],
+    box1: PosterBox,
+    box2: PosterBox,
+    multi_boxes: list[PosterBox],
+) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for i, pair in enumerate(pairs, start=1):
+        if len(pair) < 2:
+            lines.append(f"第 {i} 组 - 错误: 图片不足两张，已跳过")
+            fail += 1
+            continue
+        dest = poster_compose_output_path(poster_path, pair[0])
+        success, line = compose_poster_combined(
+            poster_path, pair[0], pair[1], box1, box2, multi_boxes, dest
+        )
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
 def sorted_main_image_paths(paths: list[str]) -> list[str]:
     """仅保留纯数字 stem（1、2、3…）并按数字排序。"""
     mains = [p for p in paths if _is_main_image_stem(_image_stem(p))]
@@ -612,14 +678,33 @@ def ask_poster_regions(
     confirm_btn = tk.Button(top_row, text="确认本框")
     confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
 
+    # 视口高度受屏幕限制，内容超出时右侧显示滚动条
+    view_h = min(disp_h, max(200, parent.winfo_screenheight() - 260))
+
+    canvas_frame = tk.Frame(dialog)
+    canvas_frame.pack(padx=12, pady=4, fill=tk.BOTH, expand=True)
+
     canvas = tk.Canvas(
-        dialog, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair"
+        canvas_frame,
+        width=disp_w,
+        height=view_h,
+        highlightthickness=1,
+        cursor="crosshair",
+        scrollregion=(0, 0, disp_w, disp_h),
     )
-    canvas.pack(padx=12, pady=4)
+    vbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=vbar.set)
+    vbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     photo = ImageTk.PhotoImage(display, master=dialog)
     canvas.create_image(0, 0, anchor="nw", image=photo)
     canvas.image = photo  # type: ignore[attr-defined]
+
+    def on_mousewheel(event: tk.Event) -> None:
+        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    canvas.bind("<MouseWheel>", on_mousewheel)
 
     state: dict = {
         "step": 1,
@@ -639,10 +724,13 @@ def ask_poster_regions(
             max(0, min(orig_h, int(round(b / scale)))),
         )
 
+    def event_xy(event: tk.Event) -> tuple[int, int]:
+        return int(canvas.canvasx(event.x)), int(canvas.canvasy(event.y))
+
     def on_press(event: tk.Event) -> None:
         if state["step"] > 2:
             return
-        state["drag_start"] = (event.x, event.y)
+        state["drag_start"] = event_xy(event)
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
             state["temp_id"] = None
@@ -652,10 +740,11 @@ def ask_poster_regions(
         if start is None:
             return
         x0, y0 = start
+        ex, ey = event_xy(event)
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
         state["temp_id"] = canvas.create_rectangle(
-            x0, y0, event.x, event.y, outline="#e53935", width=2
+            x0, y0, ex, ey, outline="#e53935", width=2
         )
 
     def on_release(event: tk.Event) -> None:
@@ -664,7 +753,8 @@ def ask_poster_regions(
             return
         x0, y0 = start
         state["drag_start"] = None
-        box = normalize_poster_box(x0, y0, event.x, event.y)
+        ex, ey = event_xy(event)
+        box = normalize_poster_box(x0, y0, ex, ey)
         if box[2] - box[0] < 4 or box[3] - box[1] < 4:
             if state["temp_id"] is not None:
                 canvas.delete(state["temp_id"])
@@ -1370,6 +1460,14 @@ class App(tk.Tk):
             "选择海报并框选多处位置；每张图（1、2、3…）贴入全部位置，各生成一张海报，"
             "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
         )
+        _add_tool_row(
+            tab_process,
+            "组合贴入…",
+            self.on_poster_combined,
+            "选择海报后先框选双图两处位置，再框选多处位置（至少 2 处）；"
+            "主图（1、2、3…）贴入位置1及全部多选位置，副图（1-1、2-2…）贴入位置2；"
+            "每组生成一张海报，保存在原海报同目录（命名为 poster_x.png，x 为主图文件名）。",
+        )
 
         tab_files = tk.Frame(notebook)
         notebook.add(tab_files, text="文件管理")
@@ -1551,6 +1649,64 @@ class App(tk.Tk):
         self.text.insert(tk.END, report)
         messagebox.showinfo(
             "海报双图贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
+        )
+
+    def on_poster_combined(self) -> None:
+        poster_path = filedialog.askopenfilename(
+            title="选择海报模板",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not poster_path:
+            return
+        regions = ask_poster_regions(self, poster_path)
+        if regions is None:
+            return
+        box1, box2 = regions
+        multi_boxes = ask_poster_regions_multi(self, poster_path)
+        if multi_boxes is None:
+            return
+
+        use_dir = messagebox.askyesno(
+            "组合贴入",
+            "是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
+        )
+        if use_dir:
+            image_dir = filedialog.askdirectory(title="选择图片文件夹")
+            if not image_dir:
+                return
+            paths = list_images_in_dir(image_dir)
+        else:
+            paths = list(
+                filedialog.askopenfilenames(
+                    title="选择要贴入的图片（主图 1/2/3… 与副图 1-1/2-2…）",
+                    filetypes=IMAGE_FILETYPES,
+                )
+            )
+            if not paths:
+                return
+
+        pairs = upload_pairs(paths)
+        if isinstance(pairs, str):
+            messagebox.showerror("组合贴入", pairs)
+            return
+        incomplete = [i for i, p in enumerate(pairs, start=1) if len(p) < 2]
+        if incomplete:
+            messagebox.showerror(
+                "组合贴入",
+                f"存在不完整的组（第 {incomplete[0]} 组等），每组须恰好 2 张图。",
+            )
+            return
+        if not pairs:
+            messagebox.showerror("组合贴入", "未找到可配对的图片。")
+            return
+
+        report, ok, fail = build_poster_combined_report(
+            poster_path, pairs, box1, box2, multi_boxes
+        )
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo(
+            "组合贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
         )
 
     def on_poster_single_multi(self) -> None:
