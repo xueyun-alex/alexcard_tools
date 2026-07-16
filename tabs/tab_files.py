@@ -1,6 +1,7 @@
 """Tab3 文件管理：批量重命名、序号重命名、序号复制。"""
 
 import os
+import re
 import shutil
 import tkinter as tk
 from dataclasses import dataclass
@@ -17,6 +18,18 @@ def rename_stem_alternating(index: int, start: int) -> str:
 
 def rename_stem(index: int) -> str:
     return rename_stem_alternating(index, 1)
+
+
+def natural_filename_key(path: str) -> tuple[tuple[int, int | str], ...]:
+    """按文件名中的数字片段进行自然排序，不区分大小写。"""
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part)
+        for part in re.split(r"(\d+)", os.path.basename(path).lower())
+    )
+
+
+def alexcard_rename_stem(index: int) -> str:
+    return f"alexcard_{index + 1}"
 
 
 @dataclass(frozen=True)
@@ -376,6 +389,12 @@ class FilesTab(ScrollableTab):
             self.on_copy_by_sequence,
             "选择图片，仅复制纯数字文件名（1、2、3…，不含 1-1、2-2）到指定文件夹，预览确认后复制。",
         )
+        _add_tool_row(
+            self.body,
+            "重命名文件…",
+            self.on_rename_to_alexcard,
+            "选择同文件夹下的图片，按原文件名自然排序后重命名为 alexcard_1、alexcard_2…，保留原扩展名。",
+        )
 
     def on_rename_images(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -450,6 +469,31 @@ class FilesTab(ScrollableTab):
         self.app.text.delete("1.0", tk.END)
         self.app.text.insert(tk.END, report)
         messagebox.showinfo("序号重命名", f"完成：成功 {ok} 张，失败 {fail} 张。")
+
+    def on_rename_to_alexcard(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要重命名为 Alexcard 顺序的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        paths = sorted(paths, key=natural_filename_key)
+        err = validate_rename_batch(paths, alexcard_rename_stem)
+        if err:
+            messagebox.showerror("重命名文件", err)
+            return
+        if not ask_rename_confirm(
+            self.app,
+            paths,
+            alexcard_rename_stem,
+            title="重命名文件",
+            hint="将按原文件名自然排序，并按以下规则重命名（不可撤销）：",
+        ):
+            return
+        report, ok, fail = build_rename_report(paths, alexcard_rename_stem)
+        self.app.text.delete("1.0", tk.END)
+        self.app.text.insert(tk.END, report)
+        messagebox.showinfo("重命名文件", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
     def on_copy_by_sequence(self) -> None:
         paths = filedialog.askopenfilenames(
