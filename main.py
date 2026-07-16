@@ -516,6 +516,65 @@ def build_poster_compose_report(
     return "\n".join(lines), ok, fail
 
 
+def compose_poster_single_multi(
+    poster_path: str,
+    img_path: str,
+    boxes: list[PosterBox],
+    dest_path: str,
+) -> tuple[bool, str]:
+    label = (
+        f"{os.path.basename(img_path)} × {len(boxes)} 处"
+        f" → {os.path.basename(dest_path)}"
+    )
+    try:
+        with Image.open(poster_path) as base:
+            poster = base.copy()
+        if os.path.splitext(poster_path)[1].lower() in (".jpg", ".jpeg"):
+            poster = prepare_for_jpeg(poster)
+        with Image.open(img_path) as im:
+            img = im.copy()
+            for box in boxes:
+                paste_into_poster(poster, img, box)
+        if poster.mode not in ("RGB", "RGBA"):
+            if poster.mode in ("LA", "P"):
+                poster = poster.convert("RGBA")
+            else:
+                poster = poster.convert("RGB")
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        poster.save(dest_path, "PNG")
+        w, h = poster.size
+        return True, f"{label} - 已保存 ({w}×{h})"
+    except Exception as e:
+        return False, f"{label} - 错误: {e}"
+
+
+def build_poster_single_multi_report(
+    poster_path: str,
+    image_paths: list[str],
+    boxes: list[PosterBox],
+) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for img_path in image_paths:
+        dest = poster_compose_output_path(poster_path, img_path)
+        success, line = compose_poster_single_multi(
+            poster_path, img_path, boxes, dest
+        )
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
+def sorted_main_image_paths(paths: list[str]) -> list[str]:
+    """仅保留纯数字 stem（1、2、3…）并按数字排序。"""
+    mains = [p for p in paths if _is_main_image_stem(_image_stem(p))]
+    mains.sort(key=lambda p: int(_image_stem(p)))
+    return mains
+
+
 def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
@@ -678,6 +737,192 @@ def ask_poster_regions(
     btn_row = tk.Frame(dialog)
     btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
     tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
+    tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    parent.wait_window(dialog)
+    return state["result"]
+
+
+_MULTI_BOX_COLORS = ("#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#e53935")
+
+
+def ask_poster_regions_multi(
+    parent: tk.Tk, poster_path: str
+) -> list[PosterBox] | None:
+    """弹出预览，边框边加多个矩形；完成框选后返回原图像素坐标，取消返回 None。"""
+    try:
+        with Image.open(poster_path) as im:
+            original = im.convert("RGBA") if im.mode == "P" else im.copy()
+            orig_w, orig_h = original.size
+    except Exception as e:
+        messagebox.showerror("单图多次贴入", f"无法打开海报：{e}", parent=parent)
+        return None
+
+    max_side = 900
+    scale = min(1.0, max_side / max(orig_w, orig_h))
+    disp_w = max(1, int(round(orig_w * scale)))
+    disp_h = max(1, int(round(orig_h * scale)))
+    display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+
+    dialog = tk.Toplevel(parent)
+    dialog.title("框选海报多个位置")
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.resizable(True, True)
+
+    hint = tk.StringVar(
+        value="请拖拽框选位置 1，完成后点击「确认本框」；至少 2 处后点「完成框选」"
+    )
+    top_row = tk.Frame(dialog)
+    top_row.pack(fill=tk.X, padx=12, pady=(12, 4))
+    tk.Label(top_row, textvariable=hint, anchor="w").pack(
+        side=tk.LEFT, fill=tk.X, expand=True
+    )
+    confirm_btn = tk.Button(top_row, text="确认本框")
+    confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+    canvas = tk.Canvas(
+        dialog, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair"
+    )
+    canvas.pack(padx=12, pady=4)
+
+    photo = ImageTk.PhotoImage(display, master=dialog)
+    canvas.create_image(0, 0, anchor="nw", image=photo)
+    canvas.image = photo  # type: ignore[attr-defined]
+
+    state: dict = {
+        "step": 1,
+        "confirmed_count": 0,
+        "boxes_disp": [],
+        "drag_start": None,
+        "temp_id": None,
+        "box_ids": [],
+        "result": None,
+    }
+
+    def canvas_to_orig(box: PosterBox) -> PosterBox:
+        l, t, r, b = box
+        return (
+            max(0, min(orig_w, int(round(l / scale)))),
+            max(0, min(orig_h, int(round(t / scale)))),
+            max(0, min(orig_w, int(round(r / scale)))),
+            max(0, min(orig_h, int(round(b / scale)))),
+        )
+
+    def box_color(step: int) -> str:
+        return _MULTI_BOX_COLORS[(step - 1) % len(_MULTI_BOX_COLORS)]
+
+    def on_press(event: tk.Event) -> None:
+        state["drag_start"] = (event.x, event.y)
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+
+    def on_drag(event: tk.Event) -> None:
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+        state["temp_id"] = canvas.create_rectangle(
+            x0, y0, event.x, event.y, outline="#e53935", width=2
+        )
+
+    def on_release(event: tk.Event) -> None:
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        state["drag_start"] = None
+        box = normalize_poster_box(x0, y0, event.x, event.y)
+        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+            if state["temp_id"] is not None:
+                canvas.delete(state["temp_id"])
+                state["temp_id"] = None
+            return
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+        while len(state["boxes_disp"]) >= state["step"]:
+            state["boxes_disp"].pop()
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+        rid = canvas.create_rectangle(*box, outline=box_color(state["step"]), width=2)
+        state["boxes_disp"].append(box)
+        state["box_ids"].append(rid)
+
+    def confirm_box() -> None:
+        if len(state["boxes_disp"]) < state["step"]:
+            messagebox.showwarning(
+                "框选海报多个位置",
+                f"请先框选位置 {state['step']}。",
+                parent=dialog,
+            )
+            return
+        state["confirmed_count"] += 1
+        state["step"] += 1
+        hint.set(
+            f"请拖拽框选位置 {state['step']}，完成后点击「确认本框」；"
+            f"或点击「完成框选」（已确认 {state['confirmed_count']} 处）"
+        )
+
+    def finish_boxes() -> None:
+        if state["confirmed_count"] < 2:
+            messagebox.showwarning(
+                "框选海报多个位置",
+                "至少须框选并确认 2 处位置。",
+                parent=dialog,
+            )
+            return
+        boxes_orig: list[PosterBox] = []
+        for i, box in enumerate(state["boxes_disp"][: state["confirmed_count"]], 1):
+            mapped = canvas_to_orig(box)
+            if mapped[2] - mapped[0] < 2 or mapped[3] - mapped[1] < 2:
+                messagebox.showwarning(
+                    "框选海报多个位置",
+                    f"位置 {i} 映射后过小，请重新框选。",
+                    parent=dialog,
+                )
+                return
+            boxes_orig.append(mapped)
+        state["result"] = boxes_orig
+        dialog.destroy()
+
+    def undo_current() -> None:
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+            return
+        if len(state["boxes_disp"]) >= state["step"] and state["box_ids"]:
+            canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+        elif state["confirmed_count"] > 0:
+            state["confirmed_count"] -= 1
+            state["step"] -= 1
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+            hint.set(
+                f"请拖拽框选位置 {state['step']}，完成后点击「确认本框」；"
+                f"或点击「完成框选」（已确认 {state['confirmed_count']} 处）"
+            )
+
+    def on_cancel() -> None:
+        state["result"] = None
+        dialog.destroy()
+
+    canvas.bind("<ButtonPress-1>", on_press)
+    canvas.bind("<B1-Motion>", on_drag)
+    canvas.bind("<ButtonRelease-1>", on_release)
+
+    confirm_btn.configure(command=confirm_box)
+
+    btn_row = tk.Frame(dialog)
+    btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
+    tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
+    tk.Button(btn_row, text="完成框选", command=finish_boxes).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
 
     dialog.protocol("WM_DELETE_WINDOW", on_cancel)
@@ -1094,6 +1339,13 @@ class App(tk.Tk):
             "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
             "按组生成新海报，保存在原海报同目录（命名为 poster_x.png，x 为该组第一张图的文件名）。",
         )
+        _add_tool_row(
+            tab_process,
+            "单图多次贴入…",
+            self.on_poster_single_multi,
+            "选择海报并框选多处位置；每张图（1、2、3…）贴入全部位置，各生成一张海报，"
+            "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
+        )
 
         tab_files = tk.Frame(notebook)
         notebook.add(tab_files, text="文件管理")
@@ -1275,6 +1527,53 @@ class App(tk.Tk):
         self.text.insert(tk.END, report)
         messagebox.showinfo(
             "海报双图贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
+        )
+
+    def on_poster_single_multi(self) -> None:
+        poster_path = filedialog.askopenfilename(
+            title="选择海报模板",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not poster_path:
+            return
+        boxes = ask_poster_regions_multi(self, poster_path)
+        if boxes is None:
+            return
+
+        use_dir = messagebox.askyesno(
+            "单图多次贴入",
+            "是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
+        )
+        if use_dir:
+            image_dir = filedialog.askdirectory(title="选择图片文件夹")
+            if not image_dir:
+                return
+            paths = list_images_in_dir(image_dir)
+        else:
+            paths = list(
+                filedialog.askopenfilenames(
+                    title="选择要贴入的图片（1、2、3…）",
+                    filetypes=IMAGE_FILETYPES,
+                )
+            )
+            if not paths:
+                return
+
+        image_paths = sorted_main_image_paths(paths)
+        if not image_paths:
+            messagebox.showerror(
+                "单图多次贴入",
+                "未找到有效图片。文件名须为纯数字（1、2、3…）。",
+            )
+            return
+
+        report, ok, fail = build_poster_single_multi_report(
+            poster_path, image_paths, boxes
+        )
+        self.text.delete("1.0", tk.END)
+        self.text.insert(tk.END, report)
+        messagebox.showinfo(
+            "单图多次贴入", f"完成：成功 {ok} 张，失败 {fail} 张。"
         )
 
     def on_rename_images(self) -> None:
