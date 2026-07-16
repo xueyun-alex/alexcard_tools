@@ -5,7 +5,7 @@ import tkinter as tk
 from typing import Iterable
 from tkinter import filedialog, messagebox, simpledialog
 
-from PIL import Image, ImageEnhance, ImageTk
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageTk
 
 from .common import (
     IMAGE_FILETYPES,
@@ -109,6 +109,215 @@ def build_brightness_report(
         else:
             fail += 1
     return "\n".join(lines), ok, fail
+
+
+WatermarkOptions = tuple[int, int, float, int, int]
+
+
+def watermark_output_path(src_path: str, out_dir: str) -> str:
+    name, ext = os.path.splitext(os.path.basename(src_path))
+    return os.path.join(out_dir, f"{name}_watermarked{ext}")
+
+
+def _load_watermark_font(size: int):
+    windir = os.environ.get("WINDIR", "")
+    candidates = [
+        os.path.join(windir, "Fonts", "arialbd.ttf") if windir else "",
+        "arialbd.ttf",
+        "Arial Bold.ttf",
+        "DejaVuSans-Bold.ttf",
+    ]
+    for path in candidates:
+        if not path:
+            continue
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    raise OSError("未找到可缩放的 Arial/DejaVu Sans 粗体字体")
+
+
+def add_tiled_watermark(
+    im: Image.Image,
+    font_size: int,
+    opacity: int,
+    angle: float,
+    horizontal_gap: int,
+    vertical_gap: int,
+) -> Image.Image:
+    """在图片上合成向右下倾斜、多行多列的 ALEXCARD 半透明水印。"""
+    base = im.convert("RGBA")
+    font = _load_watermark_font(font_size)
+    measure = ImageDraw.Draw(Image.new("L", (1, 1)))
+    bbox = measure.textbbox((0, 0), "ALEXCARD", font=font, stroke_width=1)
+    padding = 3
+    text_width = max(1, bbox[2] - bbox[0])
+    text_height = max(1, bbox[3] - bbox[1])
+    text_tile = Image.new(
+        "RGBA",
+        (text_width + padding * 2, text_height + padding * 2),
+        (0, 0, 0, 0),
+    )
+    draw = ImageDraw.Draw(text_tile)
+    fill = (255, 255, 255, round(255 * opacity / 100))
+    draw.text(
+        (padding - bbox[0], padding - bbox[1]),
+        "ALEXCARD",
+        font=font,
+        fill=fill,
+        stroke_width=1,
+        stroke_fill=fill,
+    )
+    rotated_text = text_tile.rotate(
+        -angle,
+        resample=Image.Resampling.BICUBIC,
+        expand=True,
+    )
+
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    tile_width, tile_height = rotated_text.size
+    x_step = max(1, tile_width + horizontal_gap)
+    y_step = max(1, tile_height + vertical_gap)
+    row = 0
+    y = -(tile_height // 2)
+    while y < base.height:
+        x = -(x_step // 2) if row % 2 else -(tile_width // 2)
+        while x < base.width:
+            source_left = max(0, -x)
+            source_top = max(0, -y)
+            source_right = min(tile_width, base.width - x)
+            source_bottom = min(tile_height, base.height - y)
+            if source_right > source_left and source_bottom > source_top:
+                clipped = rotated_text.crop(
+                    (source_left, source_top, source_right, source_bottom)
+                )
+                layer.alpha_composite(
+                    clipped,
+                    dest=(max(0, x), max(0, y)),
+                )
+            x += x_step
+        row += 1
+        y += y_step
+    return Image.alpha_composite(base, layer)
+
+
+def add_watermark_to_image(
+    src_path: str,
+    out_dir: str,
+    options: WatermarkOptions,
+) -> tuple[bool, str]:
+    name = os.path.basename(src_path)
+    dest = watermark_output_path(src_path, out_dir)
+    try:
+        with Image.open(src_path) as im:
+            result = add_tiled_watermark(im, *options)
+            os.makedirs(out_dir, exist_ok=True)
+            if os.path.splitext(src_path)[1].lower() in (".jpg", ".jpeg"):
+                result = prepare_for_jpeg(result)
+            save_image(result, dest, src_path)
+            width, height = result.size
+        return True, f"{os.path.basename(dest)} - 已保存 ({width}×{height})"
+    except Exception as e:
+        return False, f"{name} - 错误: {e}"
+
+
+def build_watermark_report(
+    paths: Iterable[str],
+    out_dir: str,
+    options: WatermarkOptions,
+) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for path in paths:
+        success, line = add_watermark_to_image(path, out_dir, options)
+        lines.append(line)
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
+def ask_watermark_options(parent: tk.Misc) -> WatermarkOptions | None:
+    dialog = tk.Toplevel(parent)
+    dialog.title("水印参数")
+    dialog.transient(parent)
+    dialog.resizable(False, False)
+
+    fields = (
+        ("字号（像素）", "48"),
+        ("透明度（1~100%）", "30"),
+        ("向右下倾斜角度（0~80°）", "35"),
+        ("同一行文字间距（像素）", "80"),
+        ("行间距（像素）", "60"),
+    )
+    variables: list[tk.StringVar] = []
+    entries: list[tk.Entry] = []
+    body = tk.Frame(dialog, padx=14, pady=12)
+    body.pack(fill=tk.BOTH, expand=True)
+    for row, (label, default) in enumerate(fields):
+        tk.Label(body, text=label, anchor="w").grid(
+            row=row, column=0, sticky="w", pady=4
+        )
+        variable = tk.StringVar(value=default)
+        entry = tk.Entry(body, textvariable=variable, width=12)
+        entry.grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=4)
+        variables.append(variable)
+        entries.append(entry)
+
+    result: dict[str, WatermarkOptions | None] = {"value": None}
+
+    def on_confirm() -> None:
+        try:
+            font_size = int(variables[0].get())
+            opacity = int(variables[1].get())
+            angle = float(variables[2].get())
+            horizontal_gap = int(variables[3].get())
+            vertical_gap = int(variables[4].get())
+        except ValueError:
+            messagebox.showerror("水印参数", "请输入有效的数字。", parent=dialog)
+            return
+        if not 8 <= font_size <= 500:
+            messagebox.showerror("水印参数", "字号须在 8~500 之间。", parent=dialog)
+            return
+        if not 1 <= opacity <= 100:
+            messagebox.showerror("水印参数", "透明度须在 1~100 之间。", parent=dialog)
+            return
+        if not 0 <= angle <= 80:
+            messagebox.showerror("水印参数", "倾斜角度须在 0~80 之间。", parent=dialog)
+            return
+        if not 0 <= horizontal_gap <= 2000 or not 0 <= vertical_gap <= 2000:
+            messagebox.showerror(
+                "水印参数", "文字间距和行间距须在 0~2000 之间。", parent=dialog
+            )
+            return
+        result["value"] = (
+            font_size,
+            opacity,
+            angle,
+            horizontal_gap,
+            vertical_gap,
+        )
+        dialog.destroy()
+
+    def on_cancel() -> None:
+        dialog.destroy()
+
+    buttons = tk.Frame(body)
+    buttons.grid(row=len(fields), column=0, columnspan=2, sticky="e", pady=(12, 0))
+    tk.Button(buttons, text="确定", width=9, command=on_confirm).pack(
+        side=tk.LEFT, padx=(0, 8)
+    )
+    tk.Button(buttons, text="取消", width=9, command=on_cancel).pack(side=tk.LEFT)
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    dialog.bind("<Return>", lambda _event: on_confirm())
+    dialog.bind("<Escape>", lambda _event: on_cancel())
+    dialog.grab_set()
+    entries[0].selection_range(0, tk.END)
+    entries[0].focus_set()
+    parent.wait_window(dialog)
+    return result["value"]
 
 
 PosterBox = tuple[int, int, int, int]  # left, top, right, bottom
@@ -754,6 +963,13 @@ class ProcessTab(ScrollableTab):
         )
         _add_tool_row(
             self.body,
+            "加水印…",
+            self.on_add_watermark,
+            "选择多张图片和输出文件夹，设置字号、透明度、角度及间距后，"
+            "批量添加多行多列的 ALEXCARD 白色半透明水印；输出文件名增加 _watermarked。",
+        )
+        _add_tool_row(
+            self.body,
             "转为 JPG…",
             self.on_convert_to_jpg,
             "选择图片和输出文件夹，将图片转换为 JPG（透明背景填充白色），并在报告区显示每张的转换结果。",
@@ -778,6 +994,24 @@ class ProcessTab(ScrollableTab):
             "选择海报并框选多处位置；每张图（1、2、3…）贴入全部位置，各生成一张海报，"
             "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
         )
+
+    def on_add_watermark(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="选择要加水印的图片",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not paths:
+            return
+        out_dir = filedialog.askdirectory(title="选择水印图片输出文件夹")
+        if not out_dir:
+            return
+        options = ask_watermark_options(self.app)
+        if options is None:
+            return
+        report, ok, fail = build_watermark_report(paths, out_dir, options)
+        self.app.text.delete("1.0", tk.END)
+        self.app.text.insert(tk.END, report)
+        messagebox.showinfo("加水印", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
     def on_convert_to_jpg(self) -> None:
         paths = filedialog.askopenfilenames(
