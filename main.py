@@ -41,6 +41,7 @@ class BatchPublishParams:
     image_dir: str
     image_paths: list[str]
     copy_txt: str
+    images_per_item: Literal[1, 2] = 2
 
 
 @dataclass(frozen=True)
@@ -238,14 +239,27 @@ def build_listing_description(
     return "\n\n".join(p for p in parts if p)
 
 
+def _numeric_then_name_key(path: str) -> tuple:
+    """纯数字文件名按数值排序（1、2、10），其余按文件名。"""
+    stem = _image_stem(path)
+    if _is_main_image_stem(stem):
+        return (0, int(stem), os.path.basename(path).lower())
+    return (1, 0, os.path.basename(path).lower())
+
+
 def prepare_publish_items(params: BatchPublishParams) -> list[PublishItem] | str:
     """配对图片组与文案；数量不一致则返回错误说明。"""
     copies = split_batch_copies(params.copy_txt)
     if isinstance(copies, str):
         return copies
-    pairs = upload_pairs(params.image_paths)
-    if isinstance(pairs, str):
-        return pairs
+    if params.images_per_item == 1:
+        ordered = sorted(params.image_paths, key=_numeric_then_name_key)
+        pairs: list[tuple[str, ...]] = [(p,) for p in ordered]
+    else:
+        result = upload_pairs(params.image_paths)
+        if isinstance(result, str):
+            return result
+        pairs = result
     if len(pairs) != len(copies):
         return (
             f"图片组数（{len(pairs)}）与文案条数（{len(copies)}）不一致，"
@@ -436,10 +450,10 @@ def paste_into_poster(
         poster.paste(fitted, (left, top))
 
 
-def poster_compose_output_path(poster_path: str, index: int) -> str:
+def poster_compose_output_path(poster_path: str, img1_path: str) -> str:
+    """导出为 poster_{组内第一张图stem}.png，保存在海报同目录。"""
     directory = os.path.dirname(os.path.abspath(poster_path))
-    stem, ext = os.path.splitext(os.path.basename(poster_path))
-    return os.path.join(directory, f"{stem}_{index}{ext}")
+    return os.path.join(directory, f"poster_{_image_stem(img1_path)}.png")
 
 
 def compose_poster_pair(
@@ -457,17 +471,20 @@ def compose_poster_pair(
     try:
         with Image.open(poster_path) as base:
             poster = base.copy()
-        ext = os.path.splitext(poster_path)[1].lower()
-        if ext in (".jpg", ".jpeg"):
+        # JPG 海报先转 RGB，便于贴图与导出 PNG
+        if os.path.splitext(poster_path)[1].lower() in (".jpg", ".jpeg"):
             poster = prepare_for_jpeg(poster)
         with Image.open(img1_path) as im1:
             paste_into_poster(poster, im1.copy(), box1)
         with Image.open(img2_path) as im2:
             paste_into_poster(poster, im2.copy(), box2)
-        if ext in (".jpg", ".jpeg") and poster.mode != "RGB":
-            poster = prepare_for_jpeg(poster)
+        if poster.mode not in ("RGB", "RGBA"):
+            if poster.mode in ("LA", "P"):
+                poster = poster.convert("RGBA")
+            else:
+                poster = poster.convert("RGB")
         os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
-        save_image(poster, dest_path, poster_path)
+        poster.save(dest_path, "PNG")
         w, h = poster.size
         return True, f"{label} - 已保存 ({w}×{h})"
     except Exception as e:
@@ -487,7 +504,7 @@ def build_poster_compose_report(
             lines.append(f"第 {i} 组 - 错误: 图片不足两张，已跳过")
             fail += 1
             continue
-        dest = poster_compose_output_path(poster_path, i)
+        dest = poster_compose_output_path(poster_path, pair[0])
         success, line = compose_poster_pair(
             poster_path, pair[0], pair[1], box1, box2, dest
         )
@@ -1075,7 +1092,7 @@ class App(tk.Tk):
             "海报双图贴入…",
             self.on_poster_compose,
             "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
-            "按组生成新海报，保存在原海报同目录（命名为 海报名_1、海报名_2…）。",
+            "按组生成新海报，保存在原海报同目录（命名为 poster_x.png，x 为该组第一张图的文件名）。",
         )
 
         tab_files = tk.Frame(notebook)
@@ -1431,7 +1448,8 @@ class App(tk.Tk):
             f"规格名称：{format_spec_prices(params.specs)}",
             f"运费：{params.shipping}",
             f"商品描述结尾补充：{params.desc_suffix or '（无）'}",
-            f"图片目录：{params.image_dir}（{n} 张，共 {pair_count} 组；主图优先）",
+            f"图片目录：{params.image_dir}（{n} 张，共 {pair_count} 组；"
+            f"{'一张图' if params.images_per_item == 1 else '主图+副图'}）",
             f"文案：{params.copy_txt}",
             "请确认浏览器已打开第一件发布页，开始自动填表…",
         ]
@@ -1568,8 +1586,8 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
     dlg.title("批量上线")
     dlg.transient(parent)
     dlg.grab_set()
-    dlg.minsize(520, 420)
-    dlg.geometry("600x460")
+    dlg.minsize(520, 460)
+    dlg.geometry("600x500")
 
     result: dict[str, object] = {"ok": False}
 
@@ -1621,16 +1639,43 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
     dir_row.grid(row=8, column=1, sticky="ew", pady=4, padx=(8, 0))
     dir_entry = tk.Entry(dir_row)
     dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    tk.Label(
-        form,
-        text="文件名 1、2、3… 为主图（每组第一张）；其余图按名排序与主图一一配对",
-        anchor="w",
-        fg="#666666",
-    ).grid(row=9, column=1, sticky="w", padx=(8, 0))
 
-    tk.Label(form, text="文案文件：", anchor="w").grid(row=10, column=0, sticky="w", pady=4)
+    tk.Label(form, text="每件图片数：", anchor="w").grid(
+        row=9, column=0, sticky="w", pady=4
+    )
+    images_per_item_var = tk.IntVar(value=2)
+    mode_row = tk.Frame(form)
+    mode_row.grid(row=9, column=1, sticky="w", pady=4, padx=(8, 0))
+    tk.Radiobutton(
+        mode_row,
+        text="两张图（主图+副图）",
+        variable=images_per_item_var,
+        value=2,
+    ).pack(side=tk.LEFT)
+    tk.Radiobutton(
+        mode_row,
+        text="一张图",
+        variable=images_per_item_var,
+        value=1,
+    ).pack(side=tk.LEFT, padx=(12, 0))
+
+    HINT_TWO = "文件名 1、2、3… 为主图（每组第一张）；其余图按名排序与主图一一配对"
+    HINT_ONE = "纯数字文件名按 1、2、3… 数值顺序，每张图对应一件商品"
+    image_hint = tk.Label(form, text=HINT_TWO, anchor="w", fg="#666666")
+    image_hint.grid(row=10, column=1, sticky="w", padx=(8, 0))
+
+    def on_images_per_item_changed(*_args: object) -> None:
+        image_hint.config(
+            text=HINT_ONE if images_per_item_var.get() == 1 else HINT_TWO
+        )
+
+    images_per_item_var.trace_add("write", on_images_per_item_changed)
+
+    tk.Label(form, text="文案文件：", anchor="w").grid(
+        row=11, column=0, sticky="w", pady=4
+    )
     txt_row = tk.Frame(form)
-    txt_row.grid(row=10, column=1, sticky="ew", pady=4, padx=(8, 0))
+    txt_row.grid(row=11, column=1, sticky="ew", pady=4, padx=(8, 0))
     txt_entry = tk.Entry(txt_row)
     txt_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -1681,6 +1726,12 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
     _prefill(desc_suffix_entry, "desc_suffix")
     _prefill(dir_entry, "image_dir")
     _prefill(txt_entry, "copy_txt")
+    draft_ipi = draft.get("images_per_item", "2").strip()
+    if draft_ipi == "1":
+        images_per_item_var.set(1)
+    else:
+        images_per_item_var.set(2)
+    on_images_per_item_changed()
 
     def on_ok() -> None:
         category = category_entry.get().strip()
@@ -1690,6 +1741,7 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
         desc_suffix = desc_suffix_entry.get().strip()
         image_dir = dir_entry.get().strip()
         copy_txt = txt_entry.get().strip()
+        images_per_item: Literal[1, 2] = 1 if images_per_item_var.get() == 1 else 2
         if not category:
             messagebox.showerror("批量上线", "请填写商品分类。", parent=dlg)
             return
@@ -1736,6 +1788,7 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
                 "desc_suffix": desc_suffix,
                 "image_dir": abs_dir,
                 "copy_txt": abs_txt,
+                "images_per_item": str(images_per_item),
             }
         )
         result["ok"] = True
@@ -1748,6 +1801,7 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
             image_dir=abs_dir,
             image_paths=image_paths,
             copy_txt=abs_txt,
+            images_per_item=images_per_item,
         )
         dlg.destroy()
 
