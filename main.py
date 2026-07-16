@@ -782,14 +782,33 @@ def ask_poster_regions_multi(
     confirm_btn = tk.Button(top_row, text="确认本框")
     confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
 
+    # 视口高度受屏幕限制，内容超出时右侧显示滚动条
+    view_h = min(disp_h, max(200, parent.winfo_screenheight() - 260))
+
+    canvas_frame = tk.Frame(dialog)
+    canvas_frame.pack(padx=12, pady=4, fill=tk.BOTH, expand=True)
+
     canvas = tk.Canvas(
-        dialog, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair"
+        canvas_frame,
+        width=disp_w,
+        height=view_h,
+        highlightthickness=1,
+        cursor="crosshair",
+        scrollregion=(0, 0, disp_w, disp_h),
     )
-    canvas.pack(padx=12, pady=4)
+    vbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=vbar.set)
+    vbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     photo = ImageTk.PhotoImage(display, master=dialog)
     canvas.create_image(0, 0, anchor="nw", image=photo)
     canvas.image = photo  # type: ignore[attr-defined]
+
+    def on_mousewheel(event: tk.Event) -> None:
+        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    canvas.bind("<MouseWheel>", on_mousewheel)
 
     state: dict = {
         "step": 1,
@@ -813,8 +832,11 @@ def ask_poster_regions_multi(
     def box_color(step: int) -> str:
         return _MULTI_BOX_COLORS[(step - 1) % len(_MULTI_BOX_COLORS)]
 
+    def event_xy(event: tk.Event) -> tuple[int, int]:
+        return int(canvas.canvasx(event.x)), int(canvas.canvasy(event.y))
+
     def on_press(event: tk.Event) -> None:
-        state["drag_start"] = (event.x, event.y)
+        state["drag_start"] = event_xy(event)
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
             state["temp_id"] = None
@@ -824,10 +846,11 @@ def ask_poster_regions_multi(
         if start is None:
             return
         x0, y0 = start
+        ex, ey = event_xy(event)
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
         state["temp_id"] = canvas.create_rectangle(
-            x0, y0, event.x, event.y, outline="#e53935", width=2
+            x0, y0, ex, ey, outline="#e53935", width=2
         )
 
     def on_release(event: tk.Event) -> None:
@@ -836,7 +859,8 @@ def ask_poster_regions_multi(
             return
         x0, y0 = start
         state["drag_start"] = None
-        box = normalize_poster_box(x0, y0, event.x, event.y)
+        ex, ey = event_xy(event)
+        box = normalize_poster_box(x0, y0, ex, ey)
         if box[2] - box[0] < 4 or box[3] - box[1] < 4:
             if state["temp_id"] is not None:
                 canvas.delete(state["temp_id"])
