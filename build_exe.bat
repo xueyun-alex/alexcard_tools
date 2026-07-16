@@ -18,5 +18,5 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo 已生成: %CD%\dist\alexcard_tools-1.3.0.exe
+echo 已生成: %CD%\dist\alexcard_tools-2.0.0.exe
 pause
