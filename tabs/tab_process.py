@@ -5,7 +5,7 @@ import tkinter as tk
 from typing import Iterable
 from tkinter import filedialog, messagebox, simpledialog
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageTk
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageTk
 
 from .common import (
     IMAGE_FILETYPES,
@@ -339,11 +339,21 @@ def fit_cover(im: Image.Image, box_w: int, box_h: int) -> Image.Image:
     return resized.crop((left, top, left + box_w, top + box_h))
 
 
-def paste_into_poster(
-    poster: Image.Image, img: Image.Image, box: PosterBox
-) -> None:
-    left, top, right, bottom = box
-    fitted = fit_cover(img, right - left, bottom - top)
+def fit_contain(im: Image.Image, box_w: int, box_h: int) -> Image.Image:
+    """保持原始长宽比缩放到框内最大尺寸，不裁剪图片。"""
+    if box_w <= 0 or box_h <= 0:
+        raise ValueError("框尺寸无效")
+    src_w, src_h = im.size
+    if src_w <= 0 or src_h <= 0:
+        raise ValueError("源图尺寸无效")
+    scale = min(box_w / src_w, box_h / src_h)
+    new_w = max(1, min(box_w, round(src_w * scale)))
+    new_h = max(1, min(box_h, round(src_h * scale)))
+    return im.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+
+def _paste_image(poster: Image.Image, fitted: Image.Image, left: int, top: int) -> None:
+    """按图片透明通道将已缩放图片贴到海报指定位置。"""
     if fitted.mode == "P":
         fitted = fitted.convert("RGBA")
     if fitted.mode in ("RGBA", "LA"):
@@ -353,6 +363,137 @@ def paste_into_poster(
         if fitted.mode != poster.mode and poster.mode in ("RGB", "RGBA", "L"):
             fitted = fitted.convert(poster.mode)
         poster.paste(fitted, (left, top))
+
+
+def _card_plastic_overlay(width: int, height: int) -> Image.Image:
+    """生成透明卡砖塑料层：轻微冷色、边缘高光和柔和斜向反光。"""
+    overlay = Image.new("RGBA", (width, height), (218, 238, 255, 9))
+
+    shine = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(shine)
+    # 宽而淡的主反光，模拟透明塑料表面对环境光的反射。
+    draw.polygon(
+        [
+            (-round(width * 0.12), 0),
+            (round(width * 0.13), 0),
+            (round(width * 0.58), height),
+            (round(width * 0.31), height),
+        ],
+        fill=(255, 255, 255, 30),
+    )
+    # 另一条更窄、更弱的反光，避免表面看起来过于平整。
+    draw.polygon(
+        [
+            (round(width * 0.65), 0),
+            (round(width * 0.72), 0),
+            (round(width * 0.96), height),
+            (round(width * 0.87), height),
+        ],
+        fill=(255, 255, 255, 14),
+    )
+    shine = shine.filter(
+        ImageFilter.GaussianBlur(radius=max(0.6, min(width, height) * 0.006))
+    )
+    overlay.alpha_composite(shine)
+
+    edge = ImageDraw.Draw(overlay)
+    line_width = max(1, round(min(width, height) * 0.003))
+    edge.line(
+        [(0, 0), (width - 1, 0)],
+        fill=(255, 255, 255, 75),
+        width=line_width,
+    )
+    edge.line(
+        [(0, 0), (0, height - 1)],
+        fill=(255, 255, 255, 42),
+        width=line_width,
+    )
+    edge.line(
+        [(0, height - 1), (width - 1, height - 1)],
+        fill=(70, 95, 115, 24),
+        width=line_width,
+    )
+    edge.line(
+        [(width - 1, 0), (width - 1, height - 1)],
+        fill=(70, 95, 115, 20),
+        width=line_width,
+    )
+    return overlay
+
+
+def paste_into_poster(
+    poster: Image.Image, img: Image.Image, box: PosterBox
+) -> None:
+    left, top, right, bottom = box
+    fitted = fit_cover(img, right - left, bottom - top)
+    _paste_image(poster, fitted, left, top)
+
+
+def paste_into_poster_contain(
+    poster: Image.Image, img: Image.Image, box: PosterBox
+) -> None:
+    """将完整图片做成带轻微接触阴影的卡片，居中嵌入框内且不裁剪。"""
+    left, top, right, bottom = box
+    box_w = right - left
+    box_h = bottom - top
+
+    # 给卡片与卡砖边缘留出很小的呼吸空间，避免看起来像直接覆盖模板。
+    inset = max(1, round(min(box_w, box_h) * 0.015))
+    inner_w = max(1, box_w - inset * 2)
+    inner_h = max(1, box_h - inset * 2)
+    fitted = fit_contain(img, inner_w, inner_h)
+    x = left + (box_w - fitted.width) // 2
+    y = top + (box_h - fitted.height) // 2
+
+    # 模拟卡片压在透明卡砖内的接触阴影；阴影只在卡片边缘外，不遮挡图片。
+    shadow_margin = max(2, round(min(fitted.width, fitted.height) * 0.025))
+    shadow = Image.new(
+        "RGBA",
+        (
+            fitted.width + shadow_margin * 2,
+            fitted.height + shadow_margin * 2,
+        ),
+        (0, 0, 0, 0),
+    )
+    shadow_draw = ImageDraw.Draw(shadow)
+    shadow_draw.rectangle(
+        (
+            shadow_margin,
+            shadow_margin,
+            shadow_margin + fitted.width - 1,
+            shadow_margin + fitted.height - 1,
+        ),
+        fill=(0, 0, 0, 105),
+    )
+    shadow = shadow.filter(
+        ImageFilter.GaussianBlur(radius=max(1, shadow_margin * 0.65))
+    )
+    _paste_image(
+        poster,
+        shadow,
+        x - shadow_margin,
+        y - shadow_margin + max(1, shadow_margin // 4),
+    )
+
+    # 在图片外沿加一条极细的暗边，强化真实卡片的厚度感，不裁掉图片内容。
+    edge = Image.new(
+        "RGBA",
+        (fitted.width + 2, fitted.height + 2),
+        (0, 0, 0, 0),
+    )
+    ImageDraw.Draw(edge).rectangle(
+        (0, 0, fitted.width + 1, fitted.height + 1),
+        outline=(25, 25, 25, 115),
+        width=1,
+    )
+    _paste_image(poster, edge, x - 1, y - 1)
+    _paste_image(poster, fitted, x, y)
+    _paste_image(
+        poster,
+        _card_plastic_overlay(fitted.width, fitted.height),
+        x,
+        y,
+    )
 
 
 def poster_compose_output_path(poster_path: str, img1_path: str) -> str:
@@ -439,7 +580,7 @@ def compose_poster_single_multi(
         with Image.open(img_path) as im:
             img = im.copy()
             for box in boxes:
-                paste_into_poster(poster, img, box)
+                paste_into_poster_contain(poster, img, box)
         if poster.mode not in ("RGB", "RGBA"):
             if poster.mode in ("LA", "P"):
                 poster = poster.convert("RGBA")
@@ -743,7 +884,11 @@ _MULTI_BOX_COLORS = ("#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#e53935")
 
 
 def ask_poster_regions_multi(
-    parent: tk.Tk, poster_path: str
+    parent: tk.Tk,
+    poster_path: str,
+    *,
+    min_boxes: int = 2,
+    title: str = "框选海报多个位置",
 ) -> list[PosterBox] | None:
     """弹出预览，边框边加多个矩形；完成框选后返回原图像素坐标，取消返回 None。"""
     try:
@@ -751,7 +896,7 @@ def ask_poster_regions_multi(
             original = im.convert("RGBA") if im.mode == "P" else im.copy()
             orig_w, orig_h = original.size
     except Exception as e:
-        messagebox.showerror("单图多次贴入", f"无法打开海报：{e}", parent=parent)
+        messagebox.showerror(title, f"无法打开海报：{e}", parent=parent)
         return None
 
     max_side = 900
@@ -761,13 +906,16 @@ def ask_poster_regions_multi(
     display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
 
     dialog = tk.Toplevel(parent)
-    dialog.title("框选海报多个位置")
+    dialog.title(title)
     dialog.transient(parent)
     dialog.grab_set()
     dialog.resizable(True, True)
 
     hint = tk.StringVar(
-        value="请拖拽框选位置 1，完成后点击「确认本框」；至少 2 处后点「完成框选」"
+        value=(
+            "请拖拽框选位置 1，完成后点击「确认本框」；"
+            f"至少 {min_boxes} 处后点「完成框选」"
+        )
     )
     top_row = tk.Frame(dialog)
     top_row.pack(fill=tk.X, padx=12, pady=(12, 4))
@@ -875,7 +1023,7 @@ def ask_poster_regions_multi(
     def confirm_box() -> None:
         if len(state["boxes_disp"]) < state["step"]:
             messagebox.showwarning(
-                "框选海报多个位置",
+                title,
                 f"请先框选位置 {state['step']}。",
                 parent=dialog,
             )
@@ -888,10 +1036,10 @@ def ask_poster_regions_multi(
         )
 
     def finish_boxes() -> None:
-        if state["confirmed_count"] < 2:
+        if state["confirmed_count"] < min_boxes:
             messagebox.showwarning(
-                "框选海报多个位置",
-                "至少须框选并确认 2 处位置。",
+                title,
+                f"至少须框选并确认 {min_boxes} 处位置。",
                 parent=dialog,
             )
             return
@@ -900,7 +1048,7 @@ def ask_poster_regions_multi(
             mapped = canvas_to_orig(box)
             if mapped[2] - mapped[0] < 2 or mapped[3] - mapped[1] < 2:
                 messagebox.showwarning(
-                    "框选海报多个位置",
+                    title,
                     f"位置 {i} 映射后过小，请重新框选。",
                     parent=dialog,
                 )
@@ -989,9 +1137,11 @@ class ProcessTab(ScrollableTab):
         )
         _add_tool_row(
             self.body,
-            "单图多次贴入…",
+            "单图贴入…",
             self.on_poster_single_multi,
-            "选择海报并框选多处位置；每张图（1、2、3…）贴入全部位置，各生成一张海报，"
+            "选择海报并框选一处或多处位置；图片保持原始比例、完整缩放并居中贴入，不会裁剪；"
+            "自动加入轻微内缩、接触阴影、卡片边缘和透明塑料反光，使图片更像嵌在卡砖中；"
+            "每张图（1、2、3…）贴入全部位置，各生成一张海报，"
             "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
         )
 
@@ -1176,12 +1326,17 @@ class ProcessTab(ScrollableTab):
         )
         if not poster_path:
             return
-        boxes = ask_poster_regions_multi(self.app, poster_path)
+        boxes = ask_poster_regions_multi(
+            self.app,
+            poster_path,
+            min_boxes=1,
+            title="单图贴入",
+        )
         if boxes is None:
             return
 
         use_dir = messagebox.askyesno(
-            "单图多次贴入",
+            "单图贴入",
             "是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
         )
         if use_dir:
@@ -1202,7 +1357,7 @@ class ProcessTab(ScrollableTab):
         image_paths = sorted_main_image_paths(paths)
         if not image_paths:
             messagebox.showerror(
-                "单图多次贴入",
+                "单图贴入",
                 "未找到有效图片。文件名须为纯数字（1、2、3…）。",
             )
             return
@@ -1213,5 +1368,5 @@ class ProcessTab(ScrollableTab):
         self.app.text.delete("1.0", tk.END)
         self.app.text.insert(tk.END, report)
         messagebox.showinfo(
-            "单图多次贴入", f"完成：成功 {ok} 张，失败 {fail} 张。"
+            "单图贴入", f"完成：成功 {ok} 张，失败 {fail} 张。"
         )
