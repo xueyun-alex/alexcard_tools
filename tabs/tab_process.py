@@ -1,4 +1,4 @@
-"""Tab2 图片处理：转 JPG、亮度调整、海报双图/单图多次/组合贴入。"""
+"""Tab2 图片处理：转 JPG、亮度调整、挂件袋双图/单图/组合贴入。"""
 
 import os
 import tkinter as tk
@@ -496,10 +496,14 @@ def paste_into_poster_contain(
     )
 
 
-def poster_compose_output_path(poster_path: str, img1_path: str) -> str:
-    """导出为 poster_{组内第一张图stem}.png，保存在海报同目录。"""
+def poster_compose_output_path(
+    poster_path: str,
+    img1_path: str,
+    prefix: str = "poster",
+) -> str:
+    """按指定前缀和第一张图片 stem 生成 PNG 路径，保存在海报同目录。"""
     directory = os.path.dirname(os.path.abspath(poster_path))
-    return os.path.join(directory, f"poster_{_image_stem(img1_path)}.png")
+    return os.path.join(directory, f"{prefix}_{_image_stem(img1_path)}.png")
 
 
 def compose_poster_pair(
@@ -521,9 +525,9 @@ def compose_poster_pair(
         if os.path.splitext(poster_path)[1].lower() in (".jpg", ".jpeg"):
             poster = prepare_for_jpeg(poster)
         with Image.open(img1_path) as im1:
-            paste_into_poster(poster, im1.copy(), box1)
+            paste_into_poster_contain(poster, im1.copy(), box1)
         with Image.open(img2_path) as im2:
-            paste_into_poster(poster, im2.copy(), box2)
+            paste_into_poster_contain(poster, im2.copy(), box2)
         if poster.mode not in ("RGB", "RGBA"):
             if poster.mode in ("LA", "P"):
                 poster = poster.convert("RGBA")
@@ -550,7 +554,11 @@ def build_poster_compose_report(
             lines.append(f"第 {i} 组 - 错误: 图片不足两张，已跳过")
             fail += 1
             continue
-        dest = poster_compose_output_path(poster_path, pair[0])
+        dest = poster_compose_output_path(
+            poster_path,
+            pair[0],
+            prefix="pendant_bag",
+        )
         success, line = compose_poster_pair(
             poster_path, pair[0], pair[1], box1, box2, dest
         )
@@ -602,7 +610,11 @@ def build_poster_single_multi_report(
     lines: list[str] = []
     ok = fail = 0
     for img_path in image_paths:
-        dest = poster_compose_output_path(poster_path, img_path)
+        dest = poster_compose_output_path(
+            poster_path,
+            img_path,
+            prefix="Card_brick",
+        )
         success, line = compose_poster_single_multi(
             poster_path, img_path, boxes, dest
         )
@@ -692,7 +704,10 @@ def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
 
 
 def ask_poster_regions(
-    parent: tk.Tk, poster_path: str
+    parent: tk.Tk,
+    poster_path: str,
+    *,
+    title: str = "框选海报两个位置",
 ) -> tuple[PosterBox, PosterBox] | None:
     """弹出预览，依次拖出两个矩形；确认后返回原图像素坐标，取消返回 None。"""
     try:
@@ -700,7 +715,7 @@ def ask_poster_regions(
             original = im.convert("RGBA") if im.mode == "P" else im.copy()
             orig_w, orig_h = original.size
     except Exception as e:
-        messagebox.showerror("海报双图贴入", f"无法打开海报：{e}", parent=parent)
+        messagebox.showerror(title, f"无法打开海报：{e}", parent=parent)
         return None
 
     max_side = 900
@@ -710,7 +725,7 @@ def ask_poster_regions(
     display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
 
     dialog = tk.Toplevel(parent)
-    dialog.title("框选海报两个位置")
+    dialog.title(title)
     dialog.transient(parent)
     dialog.grab_set()
     dialog.resizable(True, True)
@@ -822,7 +837,7 @@ def ask_poster_regions(
     def confirm_box() -> None:
         if len(state["boxes_disp"]) < state["step"]:
             messagebox.showwarning(
-                "框选海报两个位置",
+                title,
                 f"请先框选位置 {state['step']}。",
                 parent=dialog,
             )
@@ -835,12 +850,12 @@ def ask_poster_regions(
             b2 = canvas_to_orig(state["boxes_disp"][1])
             if b1[2] - b1[0] < 2 or b1[3] - b1[1] < 2:
                 messagebox.showwarning(
-                    "框选海报两个位置", "位置 1 映射后过小，请重新框选。", parent=dialog
+                    title, "位置 1 映射后过小，请重新框选。", parent=dialog
                 )
                 return
             if b2[2] - b2[0] < 2 or b2[3] - b2[1] < 2:
                 messagebox.showwarning(
-                    "框选海报两个位置", "位置 2 映射后过小，请重新框选。", parent=dialog
+                    title, "位置 2 映射后过小，请重新框选。", parent=dialog
                 )
                 return
             state["result"] = (b1, b2)
@@ -1111,6 +1126,23 @@ class ProcessTab(ScrollableTab):
         )
         _add_tool_row(
             self.body,
+            "挂件袋双图贴入…",
+            self.on_poster_compose,
+            "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
+            "两张图片均完整缩放、不裁剪，并加入卡片阴影、边缘和透明塑料反光；"
+            "按组生成新海报，保存在原海报同目录（命名为 pendant_bag_x.png，x 为该组第一张图的文件名）。",
+        )
+        _add_tool_row(
+            self.body,
+            "单图贴入…",
+            self.on_poster_single_multi,
+            "选择海报并框选一处或多处位置；图片保持原始比例、完整缩放并居中贴入，不会裁剪；"
+            "自动加入轻微内缩、接触阴影、卡片边缘和透明塑料反光，使图片更像嵌在卡砖中；"
+            "每张图（1、2、3…）贴入全部位置，各生成一张海报，"
+            "保存在原海报同目录（命名为 Card_brick_x.png，x 为该图文件名）。",
+        )
+        _add_tool_row(
+            self.body,
             "加水印…",
             self.on_add_watermark,
             "选择多张图片和输出文件夹，设置字号、透明度、角度及间距后，"
@@ -1127,22 +1159,6 @@ class ProcessTab(ScrollableTab):
             "调整亮度…",
             self.on_adjust_brightness,
             "选择图片和输出文件夹，按倍数（0.01~10，1.0 不变）调整亮度后保存，保留原格式。",
-        )
-        _add_tool_row(
-            self.body,
-            "海报双图贴入…",
-            self.on_poster_compose,
-            "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
-            "按组生成新海报，保存在原海报同目录（命名为 poster_x.png，x 为该组第一张图的文件名）。",
-        )
-        _add_tool_row(
-            self.body,
-            "单图贴入…",
-            self.on_poster_single_multi,
-            "选择海报并框选一处或多处位置；图片保持原始比例、完整缩放并居中贴入，不会裁剪；"
-            "自动加入轻微内缩、接触阴影、卡片边缘和透明塑料反光，使图片更像嵌在卡砖中；"
-            "每张图（1、2、3…）贴入全部位置，各生成一张海报，"
-            "保存在原海报同目录（命名为 poster_x.png，x 为该图文件名）。",
         )
 
     def on_add_watermark(self) -> None:
@@ -1213,13 +1229,17 @@ class ProcessTab(ScrollableTab):
         )
         if not poster_path:
             return
-        regions = ask_poster_regions(self.app, poster_path)
+        regions = ask_poster_regions(
+            self.app,
+            poster_path,
+            title="挂件袋双图贴入",
+        )
         if regions is None:
             return
         box1, box2 = regions
 
         use_dir = messagebox.askyesno(
-            "海报双图贴入",
+            "挂件袋双图贴入",
             "是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
         )
         if use_dir:
@@ -1239,17 +1259,17 @@ class ProcessTab(ScrollableTab):
 
         pairs = upload_pairs(paths)
         if isinstance(pairs, str):
-            messagebox.showerror("海报双图贴入", pairs)
+            messagebox.showerror("挂件袋双图贴入", pairs)
             return
         incomplete = [i for i, p in enumerate(pairs, start=1) if len(p) < 2]
         if incomplete:
             messagebox.showerror(
-                "海报双图贴入",
+                "挂件袋双图贴入",
                 f"存在不完整的组（第 {incomplete[0]} 组等），每组须恰好 2 张图。",
             )
             return
         if not pairs:
-            messagebox.showerror("海报双图贴入", "未找到可配对的图片。")
+            messagebox.showerror("挂件袋双图贴入", "未找到可配对的图片。")
             return
 
         report, ok, fail = build_poster_compose_report(
@@ -1258,7 +1278,7 @@ class ProcessTab(ScrollableTab):
         self.app.text.delete("1.0", tk.END)
         self.app.text.insert(tk.END, report)
         messagebox.showinfo(
-            "海报双图贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
+            "挂件袋双图贴入", f"完成：成功 {ok} 组，失败 {fail} 组。"
         )
 
     def on_poster_combined(self) -> None:
