@@ -27,7 +27,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="alexcard_tools-3.1.3",
+    name="alexcard_tools-3.2.0",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
