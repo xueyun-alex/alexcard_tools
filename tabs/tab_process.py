@@ -692,11 +692,9 @@ def build_poster_combined_report(
     return "\n".join(lines), ok, fail
 
 
-def sorted_main_image_paths(paths: list[str]) -> list[str]:
-    """仅保留纯数字 stem（1、2、3…）并按数字排序。"""
-    mains = [p for p in paths if _is_main_image_stem(_image_stem(p))]
-    mains.sort(key=lambda p: int(_image_stem(p)))
-    return mains
+def sorted_single_image_paths(paths: list[str]) -> list[str]:
+    """单图贴入接受任意文件名，并按文件名稳定排序。"""
+    return sorted(paths, key=lambda p: os.path.basename(p).lower())
 
 
 def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
@@ -1138,7 +1136,7 @@ class ProcessTab(ScrollableTab):
             self.on_poster_single_multi,
             "选择海报并框选一处或多处位置；图片保持原始比例、完整缩放并居中贴入，不会裁剪；"
             "自动加入轻微内缩、接触阴影、卡片边缘和透明塑料反光，使图片更像嵌在卡砖中；"
-            "每张图（1、2、3…）贴入全部位置，各生成一张海报，"
+            "支持任意图片文件名，每张图贴入全部位置并各生成一张海报，"
             "保存在原海报同目录（命名为 Card_brick_x.png，x 为该图文件名）。",
         )
         _add_tool_row(
@@ -1367,18 +1365,18 @@ class ProcessTab(ScrollableTab):
         else:
             paths = list(
                 filedialog.askopenfilenames(
-                    title="选择要贴入的图片（1、2、3…）",
+                    title="选择要贴入的图片",
                     filetypes=IMAGE_FILETYPES,
                 )
             )
             if not paths:
                 return
 
-        image_paths = sorted_main_image_paths(paths)
+        image_paths = sorted_single_image_paths(paths)
         if not image_paths:
             messagebox.showerror(
                 "单图贴入",
-                "未找到有效图片。文件名须为纯数字（1、2、3…）。",
+                "未找到可贴入的图片。",
             )
             return
 
