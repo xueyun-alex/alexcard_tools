@@ -282,7 +282,7 @@ def ask_batch_publish_dialog(parent: tk.Tk) -> BatchPublishParams | None:
         value=1,
     ).pack(side=tk.LEFT, padx=(12, 0))
 
-    HINT_TWO = "文件名 1、2、3… 为主图（每组第一张）；其余图按名排序与主图一一配对"
+    HINT_TWO = "严格按编号配对：1 与 1-1、2 与 2-2、3 与 3-3…；每组主图在前"
     HINT_ONE = "纯数字文件名按 1、2、3… 数值顺序，每张图对应一件商品"
     image_hint = tk.Label(form, text=HINT_TWO, anchor="w", fg="#666666")
     image_hint.grid(row=10, column=1, sticky="w", padx=(8, 0))

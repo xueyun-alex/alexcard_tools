@@ -1,6 +1,7 @@
 """跨 Tab 共享的常量与工具函数。"""
 
 import os
+import re
 import sys
 import tkinter as tk
 
@@ -58,34 +59,81 @@ def _is_main_image_stem(stem: str) -> bool:
     return bool(stem) and stem.isdigit()
 
 
+def _paired_image_stem(stem: str) -> str | None:
+    """返回副图 N-N 对应的主图文件名 N；不符合规则时返回 None。"""
+    matched = re.fullmatch(r"(\d+)-\1", stem)
+    return matched.group(1) if matched else None
+
+
 def upload_pairs(paths: list[str]) -> list[tuple[str, ...]] | str:
     """
     两两成组；文件名（不含扩展名）为纯数字的是主图，须作为每组第一张。
-    有主图时：主图按数字排序，其余图按文件名排序后一一配对为 (主图, 副图)。
+    有主图时：严格按编号把 N 与 N-N 配对为 (主图, 副图)，再按 N 的数值排序。
     无主图时：退回按当前顺序两两分组。
     成功返回组列表；失败返回错误说明。
     """
     if not paths:
         return "未找到图片。"
 
-    mains: list[str] = []
+    mains: dict[str, str] = {}
     others: list[str] = []
     for p in paths:
-        if _is_main_image_stem(_image_stem(p)):
-            mains.append(p)
+        stem = _image_stem(p)
+        if _is_main_image_stem(stem):
+            if stem in mains:
+                return f"主图编号 {stem} 重复，请确保每个编号只有一张主图。"
+            mains[stem] = p
         else:
             others.append(p)
 
     if mains:
-        mains.sort(key=lambda p: int(_image_stem(p)))
-        others.sort(key=lambda p: os.path.basename(p).lower())
-        if len(mains) != len(others):
+        paired: dict[str, str] = {}
+        invalid: list[str] = []
+        for p in others:
+            stem = _image_stem(p)
+            main_stem = _paired_image_stem(stem)
+            if main_stem is None:
+                invalid.append(os.path.basename(p))
+                continue
+            if main_stem in paired:
+                return (
+                    f"副图编号 {stem} 重复，请确保每个编号只有一张副图。"
+                )
+            paired[main_stem] = p
+
+        if invalid:
             return (
-                f"主图（文件名为 1、2、3…）共 {len(mains)} 张，"
-                f"副图共 {len(others)} 张，数量须一致。"
+                "两张图模式发现不符合 N-N 规则的副图："
+                f"{'、'.join(invalid)}。请按 1 与 1-1、2 与 2-2… 命名。"
             )
-        # 校验主图编号连续从 1 起更友好，但不强制（允许缺号只要数量对齐）
-        return [(mains[i], others[i]) for i in range(len(mains))]
+
+        missing = sorted(
+            (stem for stem in mains if stem not in paired),
+            key=lambda stem: (int(stem), stem),
+        )
+        orphaned = sorted(
+            (stem for stem in paired if stem not in mains),
+            key=lambda stem: (int(stem), stem),
+        )
+        if missing or orphaned:
+            details: list[str] = []
+            if missing:
+                details.append(
+                    "缺少副图 "
+                    + "、".join(f"{stem}-{stem}" for stem in missing)
+                )
+            if orphaned:
+                details.append(
+                    "缺少主图 " + "、".join(orphaned)
+                )
+            return (
+                "图片无法按编号完整配对："
+                + "；".join(details)
+                + "。每组必须是 1 与 1-1、2 与 2-2…"
+            )
+
+        ordered_stems = sorted(mains, key=lambda stem: (int(stem), stem))
+        return [(mains[stem], paired[stem]) for stem in ordered_stems]
 
     pairs: list[tuple[str, ...]] = []
     for i in range(0, len(paths), 2):
