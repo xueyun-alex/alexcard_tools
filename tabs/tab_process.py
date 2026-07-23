@@ -1,6 +1,7 @@
-"""Tab2 图片处理：转 JPG、亮度调整、挂件袋双图/单图/组合贴入。"""
+"""Tab2 图片处理：转 JPG、亮度调整、挂件袋双图/单图/多图/组合贴入。"""
 
 import os
+import re
 import tkinter as tk
 from typing import Iterable
 from tkinter import filedialog, messagebox, simpledialog
@@ -626,6 +627,90 @@ def build_poster_single_multi_report(
     return "\n".join(lines), ok, fail
 
 
+def group_multi_image_paths(
+    paths: list[str],
+    group_size: int,
+) -> list[tuple[str, ...]] | str:
+    """按框选数量将图片顺序分组；数量不足整组时返回错误说明。"""
+    if group_size <= 0:
+        return "框选位置数量无效。"
+    if not paths:
+        return "未找到可贴入的图片。"
+    remainder = len(paths) % group_size
+    if remainder:
+        missing = group_size - remainder
+        return (
+            f"已选择 {len(paths)} 张图片，但当前框选了 {group_size} 个位置；"
+            f"图片须按每组 {group_size} 张完整分组，"
+            f"最后一组只有 {remainder} 张，还缺 {missing} 张。"
+        )
+    return [
+        tuple(paths[i : i + group_size])
+        for i in range(0, len(paths), group_size)
+    ]
+
+
+def compose_poster_multi_group(
+    poster_path: str,
+    image_paths: tuple[str, ...],
+    boxes: list[PosterBox],
+    dest_path: str,
+) -> tuple[bool, str]:
+    """将一组图片按顺序做成带塑料反光的卡片并贴入对应位置。"""
+    label = (
+        f"{len(image_paths)} 张图片"
+        f" → {os.path.basename(dest_path)}"
+    )
+    if len(image_paths) != len(boxes):
+        return False, f"{label} - 错误: 图片数与框选位置数不一致"
+    try:
+        with Image.open(poster_path) as base:
+            poster = base.copy()
+        if os.path.splitext(poster_path)[1].lower() in (".jpg", ".jpeg"):
+            poster = prepare_for_jpeg(poster)
+        for image_path, box in zip(image_paths, boxes):
+            with Image.open(image_path) as image:
+                paste_into_poster_contain(poster, image.copy(), box)
+        if poster.mode not in ("RGB", "RGBA"):
+            if poster.mode in ("LA", "P"):
+                poster = poster.convert("RGBA")
+            else:
+                poster = poster.convert("RGB")
+        os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+        poster.save(dest_path, "PNG")
+        width, height = poster.size
+        return True, f"{label} - 已保存 ({width}×{height})"
+    except Exception as e:
+        return False, f"{label} - 错误: {e}"
+
+
+def build_poster_multi_report(
+    poster_path: str,
+    groups: list[tuple[str, ...]],
+    boxes: list[PosterBox],
+) -> tuple[str, int, int]:
+    lines: list[str] = []
+    ok = fail = 0
+    for index, group in enumerate(groups, start=1):
+        dest = poster_compose_output_path(
+            poster_path,
+            group[0],
+            prefix="multi_image",
+        )
+        success, line = compose_poster_multi_group(
+            poster_path,
+            group,
+            boxes,
+            dest,
+        )
+        lines.append(f"第 {index} 组：{line}")
+        if success:
+            ok += 1
+        else:
+            fail += 1
+    return "\n".join(lines), ok, fail
+
+
 def compose_poster_combined(
     poster_path: str,
     img1_path: str,
@@ -693,8 +778,15 @@ def build_poster_combined_report(
 
 
 def sorted_single_image_paths(paths: list[str]) -> list[str]:
-    """单图贴入接受任意文件名，并按文件名稳定排序。"""
-    return sorted(paths, key=lambda p: os.path.basename(p).lower())
+    """接受任意文件名，并按文件名中的数字片段进行自然排序。"""
+
+    def natural_key(path: str) -> tuple[tuple[int, int | str], ...]:
+        return tuple(
+            (1, int(part)) if part.isdigit() else (0, part)
+            for part in re.split(r"(\d+)", os.path.basename(path).lower())
+        )
+
+    return sorted(paths, key=natural_key)
 
 
 def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
@@ -1141,6 +1233,14 @@ class ProcessTab(ScrollableTab):
         )
         _add_tool_row(
             self.body,
+            "多图贴入…",
+            self.on_poster_multi,
+            "在海报上框选 n 个位置后，图片按文件名自然排序并每 n 张分为一组；"
+            "每组图片依次完整缩放到位置 1～n，不裁剪，并加入阴影、卡片边缘和透明塑料反光；"
+            "输出保存在原海报同目录（命名为 multi_image_x.png，x 为该组第一张图片文件名）。",
+        )
+        _add_tool_row(
+            self.body,
             "加水印…",
             self.on_add_watermark,
             "选择多张图片和输出文件夹，设置字号、透明度、角度及间距后，"
@@ -1387,4 +1487,59 @@ class ProcessTab(ScrollableTab):
         self.app.text.insert(tk.END, report)
         messagebox.showinfo(
             "单图贴入", f"完成：成功 {ok} 张，失败 {fail} 张。"
+        )
+
+    def on_poster_multi(self) -> None:
+        poster_path = filedialog.askopenfilename(
+            title="选择海报模板",
+            filetypes=IMAGE_FILETYPES,
+        )
+        if not poster_path:
+            return
+        boxes = ask_poster_regions_multi(
+            self.app,
+            poster_path,
+            min_boxes=1,
+            title="多图贴入",
+        )
+        if boxes is None:
+            return
+
+        group_size = len(boxes)
+        use_dir = messagebox.askyesno(
+            "多图贴入",
+            f"已框选 {group_size} 个位置，每 {group_size} 张图片生成一张海报。"
+            "\n是否从文件夹选择图片？\n「是」=选文件夹，「否」=多选文件。",
+        )
+        if use_dir:
+            image_dir = filedialog.askdirectory(title="选择图片文件夹")
+            if not image_dir:
+                return
+            paths = list_images_in_dir(image_dir)
+        else:
+            paths = list(
+                filedialog.askopenfilenames(
+                    title=f"选择要贴入的图片（每 {group_size} 张为一组）",
+                    filetypes=IMAGE_FILETYPES,
+                )
+            )
+            if not paths:
+                return
+
+        ordered_paths = sorted_single_image_paths(paths)
+        groups = group_multi_image_paths(ordered_paths, group_size)
+        if isinstance(groups, str):
+            messagebox.showerror("多图贴入", groups)
+            return
+
+        report, ok, fail = build_poster_multi_report(
+            poster_path,
+            groups,
+            boxes,
+        )
+        self.app.text.delete("1.0", tk.END)
+        self.app.text.insert(tk.END, report)
+        messagebox.showinfo(
+            "多图贴入",
+            f"完成：成功 {ok} 组，失败 {fail} 组。",
         )

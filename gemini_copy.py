@@ -88,10 +88,81 @@ BATCH_TXT_NAME = "文案汇总.txt"
 BATCH_SEPARATOR = "======="
 _SKIP_SELECTORS = ".HvurC, .Fsg96, .UrecDd, .FYF80, .DBd2Wb, .CxFouc"
 _EXTRACT_RESPONSE_JS = f"""el => {{
+    const skipSelectors = '{_SKIP_SELECTORS}';
+    const marker = '【标签】';
+    const walker = document.createTreeWalker(
+        el,
+        NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT
+    );
+    let seenTags = false;
+    let separator = null;
+    let node;
+    while ((node = walker.nextNode())) {{
+        if (node.nodeType === Node.TEXT_NODE) {{
+            if ((node.textContent || '').includes(marker)) seenTags = true;
+            continue;
+        }}
+        if (!seenTags || !(node instanceof Element)) continue;
+        if (node.closest(skipSelectors)) continue;
+
+        const tag = node.tagName.toLowerCase();
+        const role = (node.getAttribute('role') || '').toLowerCase();
+        const text = (node.innerText || node.textContent || '').trim();
+        if (tag === 'hr' || role === 'separator'
+                || /^(?:[-—–―─_=·•]\\s*){{3,}}$/.test(text)) {{
+            separator = node;
+            break;
+        }}
+
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        const topWidth = parseFloat(style.borderTopWidth) || 0;
+        const bottomWidth = parseFloat(style.borderBottomWidth) || 0;
+        const hasTopLine = topWidth > 0 && style.borderTopStyle !== 'none';
+        const hasBottomLine = bottomWidth > 0
+            && style.borderBottomStyle !== 'none';
+        const hasBackground = style.backgroundColor !== 'transparent'
+            && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+        const flatLine = text === '' && rect.height <= 8
+            && (hasTopLine || hasBottomLine || hasBackground);
+        if (rect.width >= 80 && (flatLine || hasTopLine)) {{
+            separator = node;
+            break;
+        }}
+    }}
+
+    if (separator) separator.setAttribute('data-copy-cut', '1');
     const clone = el.cloneNode(true);
+    if (separator) separator.removeAttribute('data-copy-cut');
     clone.querySelectorAll('{_SKIP_SELECTORS}').forEach(n => n.remove());
+    const cut = clone.querySelector('[data-copy-cut="1"]');
+    if (cut) {{
+        let current = cut;
+        let removeCurrent = true;
+        while (current && current !== clone) {{
+            const parent = current.parentNode;
+            let sibling = current.nextSibling;
+            while (sibling) {{
+                const next = sibling.nextSibling;
+                sibling.remove();
+                sibling = next;
+            }}
+            if (removeCurrent) current.remove();
+            removeCurrent = false;
+            current = parent;
+        }}
+    }}
     return clone.innerText.trim();
 }}"""
+
+_TEXT_SEPARATOR_RE = re.compile(
+    r"(?m)^\s*(?:[-—–―─_=·•]\s*){3,}\s*$"
+)
+_GENERIC_PREAMBLE_RE = re.compile(
+    r"^(?:以下|下面|为你|根据|可以|当然|好的|没问题|"
+    r"(?:闲鱼|商品)?文案(?:如下|内容))",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -143,15 +214,84 @@ def _section_body(text: str, label: str, next_labels: tuple[str, ...]) -> str | 
     return m.group(1).strip()
 
 
+def _recover_unlabeled_title(prefix: str) -> str | None:
+    """标题标记缺失时，取【宝贝描述】前最后一条非套话文本作为标题。"""
+    candidates: list[str] = []
+    for raw_line in prefix.splitlines():
+        line = raw_line.strip()
+        line = re.sub(r"^(?:[#*>\-]+\s*|\d+[.、)]\s*)", "", line)
+        line = re.sub(r"^(?:商品)?标题\s*[:：]\s*", "", line)
+        line = line.strip().strip("*").strip()
+        if not line:
+            continue
+        if _GENERIC_PREAMBLE_RE.search(line):
+            parts = re.split(r"[:：]", line, maxsplit=1)
+            if len(parts) < 2 or not parts[1].strip():
+                continue
+            line = parts[1].strip()
+            if _GENERIC_PREAMBLE_RE.search(line):
+                continue
+        candidates.append(line)
+    return candidates[-1] if candidates else None
+
+
+def _normalize_copy_window(raw: str) -> str:
+    """只保留三段文案窗口，并兼容标题标记缺失或标题前有套话。"""
+    text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return ""
+
+    title_index = text.find("【标题】")
+    description_index = text.find("【宝贝描述】")
+    if title_index >= 0:
+        text = text[title_index:]
+    elif description_index >= 0:
+        recovered = _recover_unlabeled_title(text[:description_index])
+        if recovered:
+            text = f"【标题】{recovered}\n{text[description_index:]}"
+
+    tags_index = text.find("【标签】")
+    if tags_index >= 0:
+        tags_start = tags_index + len("【标签】")
+        match = _TEXT_SEPARATOR_RE.search(text, tags_start)
+        if match:
+            text = text[: match.start()].rstrip()
+    return text.strip()
+
+
+def _trim_tags_footer(tags: str) -> str:
+    """标签出现后，丢弃首个非标签页脚行，防止保存分隔线下方内容。"""
+    lines = tags.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+    if not any("#" in line for line in lines):
+        return tags.strip()
+
+    kept: list[str] = []
+    tag_started = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            if tag_started:
+                continue
+            continue
+        if "#" in stripped:
+            tag_started = True
+            kept.append(stripped)
+            continue
+        if tag_started:
+            break
+    return "\n".join(kept).strip()
+
+
 def parse_gemini_copy(raw: str) -> ParsedCopy:
     """从 Gemini 回复中切出标题 / 宝贝描述 / 标签。缺段则抛 ValueError。"""
-    text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = _normalize_copy_window(raw)
     if not text:
         raise ValueError("回复为空")
 
     title = _section_body(text, "【标题】", ("【宝贝描述】", "【标签】"))
     description = _section_body(text, "【宝贝描述】", ("【标签】",))
-    tags = _section_body(text, "【标签】", ())
+    tags_raw = _section_body(text, "【标签】", ())
+    tags = _trim_tags_footer(tags_raw) if tags_raw is not None else None
 
     missing: list[str] = []
     if not title:
