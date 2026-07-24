@@ -1,7 +1,9 @@
 """Tab2 图片处理：转 JPG、亮度调整、挂件袋双图/单图/多图/组合贴入。"""
 
+import json
 import os
 import re
+import sys
 import tkinter as tk
 from typing import Iterable
 from tkinter import filedialog, messagebox, simpledialog
@@ -10,6 +12,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageTk
 
 from .common import (
     IMAGE_FILETYPES,
+    PROJECT_ROOT,
     ScrollableTab,
     _add_tool_row,
     _image_stem,
@@ -322,6 +325,102 @@ def ask_watermark_options(parent: tk.Misc) -> WatermarkOptions | None:
 
 
 PosterBox = tuple[int, int, int, int]  # left, top, right, bottom
+POSTER_REGION_PRESETS_NAME = ".poster_region_presets.json"
+PENDANT_BAG_PRESET_KEY = "pendant_bag"
+SINGLE_IMAGE_PRESET_KEY = "single_image"
+MULTI_IMAGE_PRESET_KEY = "multi_image"
+RESELECT_POSTER = object()
+
+
+def poster_region_presets_path(base_dir: str | None = None) -> str:
+    """源码运行时保存在项目目录，打包后保存在 EXE 同目录。"""
+    if base_dir is None:
+        if bool(getattr(sys, "frozen", False)) or hasattr(sys, "_MEIPASS"):
+            base_dir = os.path.dirname(os.path.abspath(sys.executable))
+        else:
+            base_dir = PROJECT_ROOT
+    return os.path.join(os.path.abspath(base_dir), POSTER_REGION_PRESETS_NAME)
+
+
+def _read_poster_region_presets(storage_path: str) -> dict:
+    if not os.path.isfile(storage_path):
+        return {}
+    try:
+        with open(storage_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def _saved_poster_box(value: object) -> PosterBox | None:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    if any(isinstance(part, bool) or not isinstance(part, (int, float)) for part in value):
+        return None
+    left, top, right, bottom = (int(round(part)) for part in value)
+    if left < 0 or top < 0 or right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def load_poster_region_preset(
+    preset_key: str,
+    *,
+    storage_path: str | None = None,
+) -> tuple[str, list[PosterBox]] | None:
+    """读取某功能保存的海报与选框；无效或图片已不存在时返回 None。"""
+    path = storage_path or poster_region_presets_path()
+    item = _read_poster_region_presets(path).get(preset_key)
+    if not isinstance(item, dict):
+        return None
+    poster_path = item.get("poster_path")
+    raw_boxes = item.get("boxes")
+    if not isinstance(poster_path, str) or not os.path.isfile(poster_path):
+        return None
+    if not isinstance(raw_boxes, list) or not raw_boxes:
+        return None
+    boxes: list[PosterBox] = []
+    for value in raw_boxes:
+        box = _saved_poster_box(value)
+        if box is None:
+            return None
+        boxes.append(box)
+    return os.path.abspath(poster_path), boxes
+
+
+def save_poster_region_preset(
+    preset_key: str,
+    poster_path: str,
+    boxes: list[PosterBox],
+    *,
+    storage_path: str | None = None,
+) -> str | None:
+    """保存某功能的海报与选框；成功返回 None，失败返回错误说明。"""
+    if not os.path.isfile(poster_path):
+        return f"海报图片不存在：{poster_path}"
+    if not boxes:
+        return "没有可保存的已确认选框。"
+    path = storage_path or poster_region_presets_path()
+    data = _read_poster_region_presets(path)
+    data[preset_key] = {
+        "poster_path": os.path.abspath(poster_path),
+        "boxes": [list(box) for box in boxes],
+    }
+    temp_path = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    except OSError as e:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return f"保存框选失败：{e}"
+    return None
 
 
 def fit_cover(im: Image.Image, box_w: int, box_h: int) -> Image.Image:
@@ -793,12 +892,59 @@ def normalize_poster_box(x0: int, y0: int, x1: int, y1: int) -> PosterBox:
     return (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
 
 
+def move_poster_box(
+    box: PosterBox,
+    dx: int,
+    dy: int,
+    max_width: int,
+    max_height: int,
+) -> PosterBox:
+    """保持框的宽高不变并移动，同时将框限制在海报范围内。"""
+    left, top, right, bottom = box
+    width = right - left
+    height = bottom - top
+    new_left = max(0, min(max_width - width, left + dx))
+    new_top = max(0, min(max_height - height, top + dy))
+    return (
+        new_left,
+        new_top,
+        new_left + width,
+        new_top + height,
+    )
+
+
+def copied_poster_box(
+    box: PosterBox,
+    max_width: int,
+    max_height: int,
+    offset: int = 12,
+) -> PosterBox:
+    """复制等尺寸框并稍微错开，方便用户看到并拖动新框。"""
+    left, top, right, bottom = box
+    dx = offset if right + offset <= max_width else -offset
+    dy = offset if bottom + offset <= max_height else -offset
+    return move_poster_box(box, dx, dy, max_width, max_height)
+
+
+def _create_box_action_buttons(
+    parent: tk.Widget,
+) -> tuple[tk.Button, tk.Button]:
+    """创建一个“确认本框”和一个“复制本框”，不影响窗口原有按钮。"""
+    confirm_btn = tk.Button(parent, text="确认本框")
+    confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
+    copy_btn = tk.Button(parent, text="复制本框", state=tk.DISABLED)
+    copy_btn.pack(side=tk.LEFT, padx=(8, 0))
+    return confirm_btn, copy_btn
+
+
 def ask_poster_regions(
     parent: tk.Tk,
     poster_path: str,
     *,
     title: str = "框选海报两个位置",
-) -> tuple[PosterBox, PosterBox] | None:
+    initial_boxes: list[PosterBox] | None = None,
+    preset_key: str | None = None,
+) -> tuple[PosterBox, PosterBox] | object | None:
     """弹出预览，依次拖出两个矩形；确认后返回原图像素坐标，取消返回 None。"""
     try:
         with Image.open(poster_path) as im:
@@ -826,209 +972,7 @@ def ask_poster_regions(
     tk.Label(top_row, textvariable=hint, anchor="w").pack(
         side=tk.LEFT, fill=tk.X, expand=True
     )
-    confirm_btn = tk.Button(top_row, text="确认本框")
-    confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-    # 视口高度受屏幕限制，内容超出时右侧显示滚动条
-    view_h = min(disp_h, max(200, parent.winfo_screenheight() - 260))
-
-    canvas_frame = tk.Frame(dialog)
-    canvas_frame.pack(padx=12, pady=4, fill=tk.BOTH, expand=True)
-
-    canvas = tk.Canvas(
-        canvas_frame,
-        width=disp_w,
-        height=view_h,
-        highlightthickness=1,
-        cursor="crosshair",
-        scrollregion=(0, 0, disp_w, disp_h),
-    )
-    vbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
-    canvas.configure(yscrollcommand=vbar.set)
-    vbar.pack(side=tk.RIGHT, fill=tk.Y)
-    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-    photo = ImageTk.PhotoImage(display, master=dialog)
-    canvas.create_image(0, 0, anchor="nw", image=photo)
-    canvas.image = photo  # type: ignore[attr-defined]
-
-    def on_mousewheel(event: tk.Event) -> None:
-        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-
-    canvas.bind("<MouseWheel>", on_mousewheel)
-
-    state: dict = {
-        "step": 1,
-        "boxes_disp": [],
-        "drag_start": None,
-        "temp_id": None,
-        "box_ids": [],
-        "result": None,
-    }
-
-    def canvas_to_orig(box: PosterBox) -> PosterBox:
-        l, t, r, b = box
-        return (
-            max(0, min(orig_w, int(round(l / scale)))),
-            max(0, min(orig_h, int(round(t / scale)))),
-            max(0, min(orig_w, int(round(r / scale)))),
-            max(0, min(orig_h, int(round(b / scale)))),
-        )
-
-    def event_xy(event: tk.Event) -> tuple[int, int]:
-        return int(canvas.canvasx(event.x)), int(canvas.canvasy(event.y))
-
-    def on_press(event: tk.Event) -> None:
-        if state["step"] > 2:
-            return
-        state["drag_start"] = event_xy(event)
-        if state["temp_id"] is not None:
-            canvas.delete(state["temp_id"])
-            state["temp_id"] = None
-
-    def on_drag(event: tk.Event) -> None:
-        start = state["drag_start"]
-        if start is None:
-            return
-        x0, y0 = start
-        ex, ey = event_xy(event)
-        if state["temp_id"] is not None:
-            canvas.delete(state["temp_id"])
-        state["temp_id"] = canvas.create_rectangle(
-            x0, y0, ex, ey, outline="#e53935", width=2
-        )
-
-    def on_release(event: tk.Event) -> None:
-        start = state["drag_start"]
-        if start is None:
-            return
-        x0, y0 = start
-        state["drag_start"] = None
-        ex, ey = event_xy(event)
-        box = normalize_poster_box(x0, y0, ex, ey)
-        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
-            if state["temp_id"] is not None:
-                canvas.delete(state["temp_id"])
-                state["temp_id"] = None
-            return
-        if state["temp_id"] is not None:
-            canvas.delete(state["temp_id"])
-            state["temp_id"] = None
-        # replace unfinished rect for current step
-        while len(state["boxes_disp"]) >= state["step"]:
-            state["boxes_disp"].pop()
-            if state["box_ids"]:
-                canvas.delete(state["box_ids"].pop())
-        color = "#1e88e5" if state["step"] == 1 else "#43a047"
-        rid = canvas.create_rectangle(*box, outline=color, width=2)
-        state["boxes_disp"].append(box)
-        state["box_ids"].append(rid)
-
-    def confirm_box() -> None:
-        if len(state["boxes_disp"]) < state["step"]:
-            messagebox.showwarning(
-                title,
-                f"请先框选位置 {state['step']}。",
-                parent=dialog,
-            )
-            return
-        if state["step"] == 1:
-            state["step"] = 2
-            hint.set("请拖拽框选位置 2，完成后点击「确认本框」")
-        else:
-            b1 = canvas_to_orig(state["boxes_disp"][0])
-            b2 = canvas_to_orig(state["boxes_disp"][1])
-            if b1[2] - b1[0] < 2 or b1[3] - b1[1] < 2:
-                messagebox.showwarning(
-                    title, "位置 1 映射后过小，请重新框选。", parent=dialog
-                )
-                return
-            if b2[2] - b2[0] < 2 or b2[3] - b2[1] < 2:
-                messagebox.showwarning(
-                    title, "位置 2 映射后过小，请重新框选。", parent=dialog
-                )
-                return
-            state["result"] = (b1, b2)
-            dialog.destroy()
-
-    def undo_current() -> None:
-        if state["temp_id"] is not None:
-            canvas.delete(state["temp_id"])
-            state["temp_id"] = None
-        if len(state["boxes_disp"]) >= state["step"] and state["box_ids"]:
-            canvas.delete(state["box_ids"].pop())
-            state["boxes_disp"].pop()
-        elif state["step"] == 2 and state["boxes_disp"]:
-            state["step"] = 1
-            hint.set("请拖拽框选位置 1，完成后点击「确认本框」")
-            if state["box_ids"]:
-                canvas.delete(state["box_ids"].pop())
-            state["boxes_disp"].pop()
-
-    def on_cancel() -> None:
-        state["result"] = None
-        dialog.destroy()
-
-    canvas.bind("<ButtonPress-1>", on_press)
-    canvas.bind("<B1-Motion>", on_drag)
-    canvas.bind("<ButtonRelease-1>", on_release)
-
-    confirm_btn.configure(command=confirm_box)
-
-    btn_row = tk.Frame(dialog)
-    btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
-    tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
-    tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
-
-    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
-    parent.wait_window(dialog)
-    return state["result"]
-
-
-_MULTI_BOX_COLORS = ("#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#e53935")
-
-
-def ask_poster_regions_multi(
-    parent: tk.Tk,
-    poster_path: str,
-    *,
-    min_boxes: int = 2,
-    title: str = "框选海报多个位置",
-) -> list[PosterBox] | None:
-    """弹出预览，边框边加多个矩形；完成框选后返回原图像素坐标，取消返回 None。"""
-    try:
-        with Image.open(poster_path) as im:
-            original = im.convert("RGBA") if im.mode == "P" else im.copy()
-            orig_w, orig_h = original.size
-    except Exception as e:
-        messagebox.showerror(title, f"无法打开海报：{e}", parent=parent)
-        return None
-
-    max_side = 900
-    scale = min(1.0, max_side / max(orig_w, orig_h))
-    disp_w = max(1, int(round(orig_w * scale)))
-    disp_h = max(1, int(round(orig_h * scale)))
-    display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
-
-    dialog = tk.Toplevel(parent)
-    dialog.title(title)
-    dialog.transient(parent)
-    dialog.grab_set()
-    dialog.resizable(True, True)
-
-    hint = tk.StringVar(
-        value=(
-            "请拖拽框选位置 1，完成后点击「确认本框」；"
-            f"至少 {min_boxes} 处后点「完成框选」"
-        )
-    )
-    top_row = tk.Frame(dialog)
-    top_row.pack(fill=tk.X, padx=12, pady=(12, 4))
-    tk.Label(top_row, textvariable=hint, anchor="w").pack(
-        side=tk.LEFT, fill=tk.X, expand=True
-    )
-    confirm_btn = tk.Button(top_row, text="确认本框")
-    confirm_btn.pack(side=tk.LEFT, padx=(8, 0))
+    confirm_btn, copy_btn = _create_box_action_buttons(top_row)
 
     # 视口高度受屏幕限制，内容超出时右侧显示滚动条
     view_h = min(disp_h, max(200, parent.winfo_screenheight() - 260))
@@ -1065,6 +1009,9 @@ def ask_poster_regions_multi(
         "drag_start": None,
         "temp_id": None,
         "box_ids": [],
+        "move_start": None,
+        "move_origin": None,
+        "moving_index": None,
         "result": None,
     }
 
@@ -1077,19 +1024,61 @@ def ask_poster_regions_multi(
             max(0, min(orig_h, int(round(b / scale)))),
         )
 
-    def box_color(step: int) -> str:
-        return _MULTI_BOX_COLORS[(step - 1) % len(_MULTI_BOX_COLORS)]
+    def orig_to_canvas(box: PosterBox) -> PosterBox | None:
+        left, top, right, bottom = box
+        mapped = (
+            max(0, min(disp_w, int(round(left * scale)))),
+            max(0, min(disp_h, int(round(top * scale)))),
+            max(0, min(disp_w, int(round(right * scale)))),
+            max(0, min(disp_h, int(round(bottom * scale)))),
+        )
+        if mapped[2] - mapped[0] < 4 or mapped[3] - mapped[1] < 4:
+            return None
+        return mapped
 
     def event_xy(event: tk.Event) -> tuple[int, int]:
         return int(canvas.canvasx(event.x)), int(canvas.canvasy(event.y))
 
     def on_press(event: tk.Event) -> None:
-        state["drag_start"] = event_xy(event)
+        if state["step"] > 2:
+            return
+        point = event_xy(event)
+        current_index = state["step"] - 1
+        if current_index < len(state["boxes_disp"]):
+            left, top, right, bottom = state["boxes_disp"][current_index]
+            if left <= point[0] <= right and top <= point[1] <= bottom:
+                state["drag_start"] = None
+                state["move_start"] = point
+                state["move_origin"] = state["boxes_disp"][current_index]
+                state["moving_index"] = current_index
+                canvas.configure(cursor="fleur")
+                return
+        state["move_start"] = None
+        state["move_origin"] = None
+        state["moving_index"] = None
+        state["drag_start"] = point
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
             state["temp_id"] = None
 
     def on_drag(event: tk.Event) -> None:
+        moving_index = state["moving_index"]
+        if moving_index is not None:
+            start = state["move_start"]
+            origin = state["move_origin"]
+            if start is None or origin is None:
+                return
+            ex, ey = event_xy(event)
+            moved = move_poster_box(
+                origin,
+                ex - start[0],
+                ey - start[1],
+                disp_w,
+                disp_h,
+            )
+            state["boxes_disp"][moving_index] = moved
+            canvas.coords(state["box_ids"][moving_index], *moved)
+            return
         start = state["drag_start"]
         if start is None:
             return
@@ -1102,6 +1091,399 @@ def ask_poster_regions_multi(
         )
 
     def on_release(event: tk.Event) -> None:
+        if state["moving_index"] is not None:
+            state["move_start"] = None
+            state["move_origin"] = None
+            state["moving_index"] = None
+            canvas.configure(cursor="crosshair")
+            return
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        state["drag_start"] = None
+        ex, ey = event_xy(event)
+        box = normalize_poster_box(x0, y0, ex, ey)
+        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+            if state["temp_id"] is not None:
+                canvas.delete(state["temp_id"])
+                state["temp_id"] = None
+            return
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+        # replace unfinished rect for current step
+        while len(state["boxes_disp"]) >= state["step"]:
+            state["boxes_disp"].pop()
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+        color = "#1e88e5" if state["step"] == 1 else "#43a047"
+        rid = canvas.create_rectangle(*box, outline=color, width=2)
+        state["boxes_disp"].append(box)
+        state["box_ids"].append(rid)
+
+    def confirm_box() -> None:
+        if len(state["boxes_disp"]) < state["step"]:
+            messagebox.showwarning(
+                title,
+                f"请先框选位置 {state['step']}。",
+                parent=dialog,
+            )
+            return
+        current_index = state["step"] - 1
+        mapped = canvas_to_orig(state["boxes_disp"][current_index])
+        if mapped[2] - mapped[0] < 2 or mapped[3] - mapped[1] < 2:
+            messagebox.showwarning(
+                title,
+                f"位置 {state['step']} 映射后过小，请重新框选。",
+                parent=dialog,
+            )
+            return
+
+        state["confirmed_count"] += 1
+        if state["confirmed_count"] == 1:
+            state["step"] = 2
+            copy_btn.configure(state=tk.NORMAL)
+            hint.set(
+                "请拖拽框选位置 2，或点击「复制本框」后移动新框；"
+                "完成后点击「确认本框」"
+            )
+        else:
+            state["step"] = 3
+            confirm_btn.configure(state=tk.DISABLED)
+            copy_btn.configure(state=tk.DISABLED)
+            finish_btn.configure(state=tk.NORMAL)
+            hint.set("两个位置均已确认，请点击「完成框选」；需要修改可先撤销。")
+
+    def copy_last_confirmed() -> None:
+        if state["confirmed_count"] != 1:
+            messagebox.showwarning(
+                title, "请先框选并确认一个位置。", parent=dialog
+            )
+            return
+        while len(state["boxes_disp"]) >= state["step"]:
+            state["boxes_disp"].pop()
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+        source = state["boxes_disp"][state["step"] - 2]
+        copied = copied_poster_box(source, disp_w, disp_h)
+        rid = canvas.create_rectangle(
+            *copied,
+            outline="#43a047",
+            width=2,
+        )
+        state["boxes_disp"].append(copied)
+        state["box_ids"].append(rid)
+        hint.set(
+            "已复制位置 1；请按住新框内部拖动到合适位置，"
+            "然后点击「确认本框」"
+        )
+
+    def finish_boxes() -> None:
+        if state["confirmed_count"] < 2:
+            messagebox.showwarning(
+                title,
+                "请先框选并确认两个位置。",
+                parent=dialog,
+            )
+            return
+        b1 = canvas_to_orig(state["boxes_disp"][0])
+        b2 = canvas_to_orig(state["boxes_disp"][1])
+        state["result"] = (b1, b2)
+        dialog.destroy()
+
+    def save_current_boxes() -> None:
+        if state["confirmed_count"] < 2:
+            messagebox.showwarning(
+                title,
+                "请先框选并确认两个位置，再保存当前框选。",
+                parent=dialog,
+            )
+            return
+        boxes = [
+            canvas_to_orig(box)
+            for box in state["boxes_disp"][: state["confirmed_count"]]
+        ]
+        error = save_poster_region_preset(
+            preset_key or "",
+            poster_path,
+            boxes,
+        )
+        if error:
+            messagebox.showerror(title, error, parent=dialog)
+            return
+        messagebox.showinfo(
+            title,
+            "已保存当前海报和两个选框，下次进入将直接加载。",
+            parent=dialog,
+        )
+
+    def undo_current() -> None:
+        state["move_start"] = None
+        state["move_origin"] = None
+        state["moving_index"] = None
+        canvas.configure(cursor="crosshair")
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+            return
+        if len(state["boxes_disp"]) > state["confirmed_count"]:
+            canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+        elif state["confirmed_count"] > 0 and state["boxes_disp"]:
+            state["confirmed_count"] -= 1
+            state["step"] = state["confirmed_count"] + 1
+            canvas.delete(state["box_ids"].pop())
+            state["boxes_disp"].pop()
+
+        finish_btn.configure(state=tk.DISABLED)
+        confirm_btn.configure(state=tk.NORMAL)
+        if state["confirmed_count"] == 0:
+            state["step"] = 1
+            copy_btn.configure(state=tk.DISABLED)
+            hint.set("请拖拽框选位置 1，完成后点击「确认本框」")
+        else:
+            state["step"] = 2
+            copy_btn.configure(state=tk.NORMAL)
+            hint.set(
+                "请拖拽框选位置 2，或点击「复制本框」后移动新框；"
+                "完成后点击「确认本框」"
+            )
+
+    def on_cancel() -> None:
+        state["result"] = None
+        dialog.destroy()
+
+    def on_reselect_poster() -> None:
+        state["result"] = RESELECT_POSTER
+        dialog.destroy()
+
+    canvas.bind("<ButtonPress-1>", on_press)
+    canvas.bind("<B1-Motion>", on_drag)
+    canvas.bind("<ButtonRelease-1>", on_release)
+
+    confirm_btn.configure(command=confirm_box)
+    copy_btn.configure(command=copy_last_confirmed)
+
+    btn_row = tk.Frame(dialog)
+    btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
+    tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
+    if preset_key:
+        tk.Button(
+            btn_row,
+            text="保存当前框选",
+            command=save_current_boxes,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+    finish_btn = tk.Button(
+        btn_row,
+        text="完成框选",
+        command=finish_boxes,
+        state=tk.DISABLED,
+    )
+    finish_btn.pack(side=tk.LEFT, padx=(8, 0))
+    tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
+    if preset_key:
+        tk.Button(
+            btn_row,
+            text="重选图片",
+            command=on_reselect_poster,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+    if initial_boxes and len(initial_boxes) == 2:
+        loaded_boxes = [orig_to_canvas(box) for box in initial_boxes]
+        if all(box is not None for box in loaded_boxes):
+            for index, box in enumerate(loaded_boxes):
+                assert box is not None
+                color = "#1e88e5" if index == 0 else "#43a047"
+                state["boxes_disp"].append(box)
+                state["box_ids"].append(
+                    canvas.create_rectangle(*box, outline=color, width=2)
+                )
+            state["confirmed_count"] = 2
+            state["step"] = 3
+            confirm_btn.configure(state=tk.DISABLED)
+            copy_btn.configure(state=tk.DISABLED)
+            finish_btn.configure(state=tk.NORMAL)
+            hint.set(
+                "已加载保存的海报和两个选框；可直接完成、保存，"
+                "或点击「重选图片」重新框选。"
+            )
+
+    dialog.protocol("WM_DELETE_WINDOW", on_cancel)
+    parent.wait_window(dialog)
+    return state["result"]
+
+
+_MULTI_BOX_COLORS = ("#1e88e5", "#43a047", "#fb8c00", "#8e24aa", "#e53935")
+
+
+def ask_poster_regions_multi(
+    parent: tk.Tk,
+    poster_path: str,
+    *,
+    min_boxes: int = 2,
+    title: str = "框选海报多个位置",
+    initial_boxes: list[PosterBox] | None = None,
+    preset_key: str | None = None,
+) -> list[PosterBox] | object | None:
+    """弹出预览，边框边加多个矩形；完成框选后返回原图像素坐标，取消返回 None。"""
+    try:
+        with Image.open(poster_path) as im:
+            original = im.convert("RGBA") if im.mode == "P" else im.copy()
+            orig_w, orig_h = original.size
+    except Exception as e:
+        messagebox.showerror(title, f"无法打开海报：{e}", parent=parent)
+        return None
+
+    max_side = 900
+    scale = min(1.0, max_side / max(orig_w, orig_h))
+    disp_w = max(1, int(round(orig_w * scale)))
+    disp_h = max(1, int(round(orig_h * scale)))
+    display = original.resize((disp_w, disp_h), Image.Resampling.LANCZOS)
+
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent)
+    dialog.grab_set()
+    dialog.resizable(True, True)
+
+    hint = tk.StringVar(
+        value=(
+            "请拖拽框选位置 1，完成后点击「确认本框」；"
+            f"至少 {min_boxes} 处后点「完成框选」"
+        )
+    )
+    top_row = tk.Frame(dialog)
+    top_row.pack(fill=tk.X, padx=12, pady=(12, 4))
+    tk.Label(top_row, textvariable=hint, anchor="w").pack(
+        side=tk.LEFT, fill=tk.X, expand=True
+    )
+    confirm_btn, copy_btn = _create_box_action_buttons(top_row)
+
+    # 视口高度受屏幕限制，内容超出时右侧显示滚动条
+    view_h = min(disp_h, max(200, parent.winfo_screenheight() - 260))
+
+    canvas_frame = tk.Frame(dialog)
+    canvas_frame.pack(padx=12, pady=4, fill=tk.BOTH, expand=True)
+
+    canvas = tk.Canvas(
+        canvas_frame,
+        width=disp_w,
+        height=view_h,
+        highlightthickness=1,
+        cursor="crosshair",
+        scrollregion=(0, 0, disp_w, disp_h),
+    )
+    vbar = tk.Scrollbar(canvas_frame, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=vbar.set)
+    vbar.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    photo = ImageTk.PhotoImage(display, master=dialog)
+    canvas.create_image(0, 0, anchor="nw", image=photo)
+    canvas.image = photo  # type: ignore[attr-defined]
+
+    def on_mousewheel(event: tk.Event) -> None:
+        canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+
+    canvas.bind("<MouseWheel>", on_mousewheel)
+
+    state: dict = {
+        "step": 1,
+        "confirmed_count": 0,
+        "boxes_disp": [],
+        "drag_start": None,
+        "temp_id": None,
+        "box_ids": [],
+        "move_start": None,
+        "move_origin": None,
+        "moving_index": None,
+        "result": None,
+    }
+
+    def canvas_to_orig(box: PosterBox) -> PosterBox:
+        l, t, r, b = box
+        return (
+            max(0, min(orig_w, int(round(l / scale)))),
+            max(0, min(orig_h, int(round(t / scale)))),
+            max(0, min(orig_w, int(round(r / scale)))),
+            max(0, min(orig_h, int(round(b / scale)))),
+        )
+
+    def orig_to_canvas(box: PosterBox) -> PosterBox | None:
+        left, top, right, bottom = box
+        mapped = (
+            max(0, min(disp_w, int(round(left * scale)))),
+            max(0, min(disp_h, int(round(top * scale)))),
+            max(0, min(disp_w, int(round(right * scale)))),
+            max(0, min(disp_h, int(round(bottom * scale)))),
+        )
+        if mapped[2] - mapped[0] < 4 or mapped[3] - mapped[1] < 4:
+            return None
+        return mapped
+
+    def box_color(step: int) -> str:
+        return _MULTI_BOX_COLORS[(step - 1) % len(_MULTI_BOX_COLORS)]
+
+    def event_xy(event: tk.Event) -> tuple[int, int]:
+        return int(canvas.canvasx(event.x)), int(canvas.canvasy(event.y))
+
+    def on_press(event: tk.Event) -> None:
+        point = event_xy(event)
+        current_index = state["step"] - 1
+        if current_index < len(state["boxes_disp"]):
+            left, top, right, bottom = state["boxes_disp"][current_index]
+            if left <= point[0] <= right and top <= point[1] <= bottom:
+                state["drag_start"] = None
+                state["move_start"] = point
+                state["move_origin"] = state["boxes_disp"][current_index]
+                state["moving_index"] = current_index
+                canvas.configure(cursor="fleur")
+                return
+        state["move_start"] = None
+        state["move_origin"] = None
+        state["moving_index"] = None
+        state["drag_start"] = point
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+            state["temp_id"] = None
+
+    def on_drag(event: tk.Event) -> None:
+        moving_index = state["moving_index"]
+        if moving_index is not None:
+            start = state["move_start"]
+            origin = state["move_origin"]
+            if start is None or origin is None:
+                return
+            ex, ey = event_xy(event)
+            moved = move_poster_box(
+                origin,
+                ex - start[0],
+                ey - start[1],
+                disp_w,
+                disp_h,
+            )
+            state["boxes_disp"][moving_index] = moved
+            canvas.coords(state["box_ids"][moving_index], *moved)
+            return
+        start = state["drag_start"]
+        if start is None:
+            return
+        x0, y0 = start
+        ex, ey = event_xy(event)
+        if state["temp_id"] is not None:
+            canvas.delete(state["temp_id"])
+        state["temp_id"] = canvas.create_rectangle(
+            x0, y0, ex, ey, outline="#e53935", width=2
+        )
+
+    def on_release(event: tk.Event) -> None:
+        if state["moving_index"] is not None:
+            state["move_start"] = None
+            state["move_origin"] = None
+            state["moving_index"] = None
+            canvas.configure(cursor="crosshair")
+            return
         start = state["drag_start"]
         if start is None:
             return
@@ -1135,9 +1517,38 @@ def ask_poster_regions_multi(
             return
         state["confirmed_count"] += 1
         state["step"] += 1
+        copy_btn.configure(state=tk.NORMAL)
         hint.set(
-            f"请拖拽框选位置 {state['step']}，完成后点击「确认本框」；"
+            f"请拖拽框选位置 {state['step']}，或点击「复制本框」后移动新框；"
             f"或点击「完成框选」（已确认 {state['confirmed_count']} 处）"
+        )
+
+    def copy_last_confirmed() -> None:
+        if state["confirmed_count"] < 1:
+            messagebox.showwarning(
+                title, "请先框选并确认一个位置。", parent=dialog
+            )
+            return
+        while len(state["boxes_disp"]) >= state["step"]:
+            state["boxes_disp"].pop()
+            if state["box_ids"]:
+                canvas.delete(state["box_ids"].pop())
+        source_index = state["confirmed_count"] - 1
+        copied = copied_poster_box(
+            state["boxes_disp"][source_index],
+            disp_w,
+            disp_h,
+        )
+        rid = canvas.create_rectangle(
+            *copied,
+            outline=box_color(state["step"]),
+            width=2,
+        )
+        state["boxes_disp"].append(copied)
+        state["box_ids"].append(rid)
+        hint.set(
+            f"已复制位置 {state['confirmed_count']}；请按住新框内部拖动，"
+            "移动合适后点击「确认本框」"
         )
 
     def finish_boxes() -> None:
@@ -1162,7 +1573,37 @@ def ask_poster_regions_multi(
         state["result"] = boxes_orig
         dialog.destroy()
 
+    def save_current_boxes() -> None:
+        if state["confirmed_count"] < min_boxes:
+            messagebox.showwarning(
+                title,
+                f"请先框选并确认至少 {min_boxes} 个位置，再保存当前框选。",
+                parent=dialog,
+            )
+            return
+        boxes = [
+            canvas_to_orig(box)
+            for box in state["boxes_disp"][: state["confirmed_count"]]
+        ]
+        error = save_poster_region_preset(
+            preset_key or "",
+            poster_path,
+            boxes,
+        )
+        if error:
+            messagebox.showerror(title, error, parent=dialog)
+            return
+        messagebox.showinfo(
+            title,
+            f"已保存当前海报和 {len(boxes)} 个选框，下次进入将直接加载。",
+            parent=dialog,
+        )
+
     def undo_current() -> None:
+        state["move_start"] = None
+        state["move_origin"] = None
+        state["moving_index"] = None
+        canvas.configure(cursor="crosshair")
         if state["temp_id"] is not None:
             canvas.delete(state["temp_id"])
             state["temp_id"] = None
@@ -1180,9 +1621,16 @@ def ask_poster_regions_multi(
                 f"请拖拽框选位置 {state['step']}，完成后点击「确认本框」；"
                 f"或点击「完成框选」（已确认 {state['confirmed_count']} 处）"
             )
+        copy_btn.configure(
+            state=tk.NORMAL if state["confirmed_count"] > 0 else tk.DISABLED
+        )
 
     def on_cancel() -> None:
         state["result"] = None
+        dialog.destroy()
+
+    def on_reselect_poster() -> None:
+        state["result"] = RESELECT_POSTER
         dialog.destroy()
 
     canvas.bind("<ButtonPress-1>", on_press)
@@ -1190,12 +1638,46 @@ def ask_poster_regions_multi(
     canvas.bind("<ButtonRelease-1>", on_release)
 
     confirm_btn.configure(command=confirm_box)
+    copy_btn.configure(command=copy_last_confirmed)
 
     btn_row = tk.Frame(dialog)
     btn_row.pack(fill=tk.X, padx=12, pady=(8, 12))
     tk.Button(btn_row, text="撤销当前框", command=undo_current).pack(side=tk.LEFT)
+    if preset_key:
+        tk.Button(
+            btn_row,
+            text="保存当前框选",
+            command=save_current_boxes,
+        ).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(btn_row, text="完成框选", command=finish_boxes).pack(side=tk.LEFT, padx=(8, 0))
     tk.Button(btn_row, text="取消", command=on_cancel).pack(side=tk.RIGHT)
+    if preset_key:
+        tk.Button(
+            btn_row,
+            text="重选图片",
+            command=on_reselect_poster,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+    if initial_boxes and len(initial_boxes) >= min_boxes:
+        loaded_boxes = [orig_to_canvas(box) for box in initial_boxes]
+        if all(box is not None for box in loaded_boxes):
+            for index, box in enumerate(loaded_boxes, start=1):
+                assert box is not None
+                state["boxes_disp"].append(box)
+                state["box_ids"].append(
+                    canvas.create_rectangle(
+                        *box,
+                        outline=box_color(index),
+                        width=2,
+                    )
+                )
+            state["confirmed_count"] = len(loaded_boxes)
+            state["step"] = state["confirmed_count"] + 1
+            copy_btn.configure(state=tk.NORMAL)
+            hint.set(
+                f"已加载保存的海报和 {state['confirmed_count']} 个选框；"
+                "可直接完成、继续添加，或点击「重选图片」重新框选。"
+            )
 
     dialog.protocol("WM_DELETE_WINDOW", on_cancel)
     parent.wait_window(dialog)
@@ -1219,6 +1701,7 @@ class ProcessTab(ScrollableTab):
             "挂件袋双图贴入…",
             self.on_poster_compose,
             "选择海报并框选两个位置；主图（1、2、3…）贴入位置1，副图（1-1、2-2…）贴入位置2；"
+            "确认第一个框后可复制等尺寸框并自由拖动到第二个位置；"
             "两张图片均完整缩放、不裁剪，并加入卡片阴影、边缘和透明塑料反光；"
             "按组生成新海报，保存在原海报同目录（命名为 pendant_bag_x.png，x 为该组第一张图的文件名）。",
         )
@@ -1236,6 +1719,7 @@ class ProcessTab(ScrollableTab):
             "多图贴入…",
             self.on_poster_multi,
             "在海报上框选 n 个位置后，图片按文件名自然排序并每 n 张分为一组；"
+            "确认任一框后可复制等尺寸框，并拖动到新的位置后继续确认；"
             "每组图片依次完整缩放到位置 1～n，不裁剪，并加入阴影、卡片边缘和透明塑料反光；"
             "输出保存在原海报同目录（命名为 multi_image_x.png，x 为该组第一张图片文件名）。",
         )
@@ -1258,6 +1742,81 @@ class ProcessTab(ScrollableTab):
             self.on_adjust_brightness,
             "选择图片和输出文件夹，按倍数（0.01~10，1.0 不变）调整亮度后保存，保留原格式。",
         )
+
+    def _select_dual_regions_with_preset(
+        self,
+        preset_key: str,
+        title: str,
+    ) -> tuple[str, tuple[PosterBox, PosterBox]] | None:
+        saved = load_poster_region_preset(preset_key)
+        if saved is not None and len(saved[1]) == 2:
+            poster_path: str | None = saved[0]
+            initial_boxes: list[PosterBox] | None = saved[1]
+        else:
+            poster_path = None
+            initial_boxes = None
+
+        while True:
+            if poster_path is None:
+                poster_path = filedialog.askopenfilename(
+                    title="选择海报模板",
+                    filetypes=IMAGE_FILETYPES,
+                )
+                if not poster_path:
+                    return None
+            regions = ask_poster_regions(
+                self.app,
+                poster_path,
+                title=title,
+                initial_boxes=initial_boxes,
+                preset_key=preset_key,
+            )
+            if regions is RESELECT_POSTER:
+                poster_path = None
+                initial_boxes = None
+                continue
+            if regions is None:
+                return None
+            if isinstance(regions, tuple) and len(regions) == 2:
+                return poster_path, regions
+
+    def _select_multi_regions_with_preset(
+        self,
+        preset_key: str,
+        title: str,
+    ) -> tuple[str, list[PosterBox]] | None:
+        saved = load_poster_region_preset(preset_key)
+        if saved is not None:
+            poster_path: str | None = saved[0]
+            initial_boxes: list[PosterBox] | None = saved[1]
+        else:
+            poster_path = None
+            initial_boxes = None
+
+        while True:
+            if poster_path is None:
+                poster_path = filedialog.askopenfilename(
+                    title="选择海报模板",
+                    filetypes=IMAGE_FILETYPES,
+                )
+                if not poster_path:
+                    return None
+            boxes = ask_poster_regions_multi(
+                self.app,
+                poster_path,
+                min_boxes=1,
+                title=title,
+                initial_boxes=initial_boxes,
+                preset_key=preset_key,
+            )
+            if boxes is RESELECT_POSTER:
+                poster_path = None
+                initial_boxes = None
+                continue
+            if boxes is None:
+                return None
+            if isinstance(boxes, list):
+                return poster_path, boxes
 
     def on_add_watermark(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -1321,19 +1880,13 @@ class ProcessTab(ScrollableTab):
         messagebox.showinfo("调整亮度", f"完成：成功 {ok} 张，失败 {fail} 张。")
 
     def on_poster_compose(self) -> None:
-        poster_path = filedialog.askopenfilename(
-            title="选择海报模板",
-            filetypes=IMAGE_FILETYPES,
+        selection = self._select_dual_regions_with_preset(
+            PENDANT_BAG_PRESET_KEY,
+            "挂件袋双图贴入",
         )
-        if not poster_path:
+        if selection is None:
             return
-        regions = ask_poster_regions(
-            self.app,
-            poster_path,
-            title="挂件袋双图贴入",
-        )
-        if regions is None:
-            return
+        poster_path, regions = selection
         box1, box2 = regions
 
         use_dir = messagebox.askyesno(
@@ -1438,20 +1991,13 @@ class ProcessTab(ScrollableTab):
         )
 
     def on_poster_single_multi(self) -> None:
-        poster_path = filedialog.askopenfilename(
-            title="选择海报模板",
-            filetypes=IMAGE_FILETYPES,
+        selection = self._select_multi_regions_with_preset(
+            SINGLE_IMAGE_PRESET_KEY,
+            "单图贴入",
         )
-        if not poster_path:
+        if selection is None:
             return
-        boxes = ask_poster_regions_multi(
-            self.app,
-            poster_path,
-            min_boxes=1,
-            title="单图贴入",
-        )
-        if boxes is None:
-            return
+        poster_path, boxes = selection
 
         use_dir = messagebox.askyesno(
             "单图贴入",
@@ -1490,20 +2036,13 @@ class ProcessTab(ScrollableTab):
         )
 
     def on_poster_multi(self) -> None:
-        poster_path = filedialog.askopenfilename(
-            title="选择海报模板",
-            filetypes=IMAGE_FILETYPES,
+        selection = self._select_multi_regions_with_preset(
+            MULTI_IMAGE_PRESET_KEY,
+            "多图贴入",
         )
-        if not poster_path:
+        if selection is None:
             return
-        boxes = ask_poster_regions_multi(
-            self.app,
-            poster_path,
-            min_boxes=1,
-            title="多图贴入",
-        )
-        if boxes is None:
-            return
+        poster_path, boxes = selection
 
         group_size = len(boxes)
         use_dir = messagebox.askyesno(
