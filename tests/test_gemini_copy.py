@@ -1,3 +1,5 @@
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -6,8 +8,10 @@ from gemini_copy import (
     _extract_reply_text,
     build_generation_prompt,
     format_copy_document,
+    load_last_gemini_prompt,
     parse_gemini_copy,
     process_one_image,
+    save_last_gemini_prompt,
 )
 
 
@@ -167,6 +171,43 @@ class GeminiCopyParsingTests(unittest.TestCase):
         self.assertIn("【宝贝描述】", prompt)
         self.assertIn("【标签】", prompt)
         self.assertIn("三个区段都不能为空", prompt)
+
+    def test_last_modified_prompt_is_saved_and_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = os.path.join(temp_dir, "last_prompt.txt")
+            prompt = "第一行自定义提示词\n第二行修改内容"
+
+            error = save_last_gemini_prompt(
+                prompt,
+                storage_path=storage_path,
+            )
+            loaded = load_last_gemini_prompt(
+                "默认提示词",
+                storage_path=storage_path,
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(loaded, prompt)
+
+    def test_missing_or_empty_last_prompt_uses_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = os.path.join(temp_dir, "last_prompt.txt")
+            self.assertEqual(
+                load_last_gemini_prompt(
+                    "默认提示词",
+                    storage_path=storage_path,
+                ),
+                "默认提示词",
+            )
+            with open(storage_path, "w", encoding="utf-8") as f:
+                f.write("   \n")
+            self.assertEqual(
+                load_last_gemini_prompt(
+                    "默认提示词",
+                    storage_path=storage_path,
+                ),
+                "默认提示词",
+            )
 
     def test_process_retries_once_with_format_repair_prompt(self) -> None:
         repaired = (

@@ -39,5 +39,33 @@
         1187
       ]
     ]
+  },
+  "pendant_bag": {
+    "poster_path": "C:\\Users\\79892\\Desktop\\成品图\\ChatGPT Image 2026年7月18日 01_37_41.png",
+    "boxes": [
+      [
+        157,
+        653,
+        492,
+        1133
+      ],
+      [
+        655,
+        736,
+        989,
+        1215
+      ]
+    ]
+  },
+  "single_image": {
+    "poster_path": "C:\\Users\\79892\\Desktop\\成品图\\ChatGPT Image 2026年7月18日 01_43_06.png",
+    "boxes": [
+      [
+        359,
+        397,
+        861,
+        1098
+      ]
+    ]
   }
 }

@@ -24,6 +24,55 @@ def app_dir() -> str:
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
+
+LAST_GEMINI_PROMPT_NAME = ".gemini_last_prompt.txt"
+
+
+def last_gemini_prompt_path(base_dir: str | None = None) -> str:
+    return os.path.join(base_dir or app_dir(), LAST_GEMINI_PROMPT_NAME)
+
+
+def load_last_gemini_prompt(
+    default_prompt: str,
+    *,
+    storage_path: str | None = None,
+) -> str:
+    """读取上次确认使用的提示词；文件无效时退回默认提示词。"""
+    path = storage_path or last_gemini_prompt_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            prompt = f.read().strip()
+        return prompt or default_prompt
+    except OSError:
+        return default_prompt
+
+
+def save_last_gemini_prompt(
+    prompt: str,
+    *,
+    storage_path: str | None = None,
+) -> str | None:
+    """原子保存提示词；成功返回 None，失败返回错误说明。"""
+    text = prompt.strip()
+    if not text:
+        return "提示词为空，无法保存。"
+    path = storage_path or last_gemini_prompt_path()
+    temp_path = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(temp_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text + "\n")
+        os.replace(temp_path, path)
+    except OSError as e:
+        try:
+            if os.path.isfile(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
+        return f"保存上次提示词失败：{e}"
+    return None
+
+
 # 固定风格提示词（来自用户提供的 Google 搜索 q= 示例，去掉会话参数）
 GEMINI_STYLE_PROMPT = (
     "【标题】姆巴佩球星卡 2026世界杯限定哈兰德球星卡双人对决忍者神龟VS魔人布欧同人海报大卡周边"

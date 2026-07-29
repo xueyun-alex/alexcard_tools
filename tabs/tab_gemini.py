@@ -4,7 +4,12 @@ import os
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 
-from gemini_copy import GEMINI_STYLE_PROMPT, get_gemini_session
+from gemini_copy import (
+    GEMINI_STYLE_PROMPT,
+    get_gemini_session,
+    load_last_gemini_prompt,
+    save_last_gemini_prompt,
+)
 
 from .common import IMAGE_FILETYPES, ScrollableTab, _add_tool_row
 
@@ -148,10 +153,14 @@ class GeminiTab(ScrollableTab):
         if self._busy:
             messagebox.showinfo("批量获取文案", "正在处理中，请稍候。")
             return
-        result = ask_gemini_batch_dialog(self.app, GEMINI_STYLE_PROMPT)
+        default_prompt = load_last_gemini_prompt(GEMINI_STYLE_PROMPT)
+        result = ask_gemini_batch_dialog(self.app, default_prompt)
         if result is None:
             return
         prompt, paths = result
+        save_error = save_last_gemini_prompt(prompt)
+        if save_error:
+            messagebox.showwarning("批量获取文案", save_error)
         self._busy = True
         self.app.text.delete("1.0", tk.END)
         self.app.text.insert(tk.END, f"开始处理 {len(paths)} 张图片…\n")
