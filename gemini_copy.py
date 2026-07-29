@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -38,6 +39,31 @@ GEMINI_STYLE_PROMPT = (
     "#2026世界杯周边 #自制卡周边 #整活同人卡 #桌面摆件 #闲鱼好物 "
     "模仿整个风格写个闲鱼售卖文案"
 )
+
+OUTPUT_FORMAT_INSTRUCTION = (
+    "输出时必须只保留以下三个区段，不要使用 Markdown 代码块，"
+    "不要添加前言、解释、总结或分隔线。三个区段都不能为空：\n"
+    "【标题】\n"
+    "商品标题\n"
+    "【宝贝描述】\n"
+    "完整商品描述\n"
+    "【标签】\n"
+    "#标签1 #标签2"
+)
+FORMAT_REPAIR_PROMPT = (
+    "请只整理你上一条回答，不要重新分析图片，也不要省略已有内容。"
+    "如果上一条没有明确标题，请根据上一条文案补出一个商品标题。"
+    "只输出以下三个区段，禁止输出其他文字：\n"
+    "【标题】\n商品标题\n"
+    "【宝贝描述】\n完整商品描述\n"
+    "【标签】\n#标签1 #标签2"
+)
+
+
+def build_generation_prompt(prompt: str) -> str:
+    """在用户提示词后固定追加机器可解析的输出契约。"""
+    return f"{prompt.strip()}\n\n{OUTPUT_FORMAT_INSTRUCTION}"
+
 
 GOOGLE_AI_SEARCH_BASE = "https://www.google.com.hk/search"
 # AI Mode 对话页（不带超长 q=，避免落到无输入框的结果页）
@@ -89,7 +115,7 @@ BATCH_SEPARATOR = "======="
 _SKIP_SELECTORS = ".HvurC, .Fsg96, .UrecDd, .FYF80, .DBd2Wb, .CxFouc"
 _EXTRACT_RESPONSE_JS = f"""el => {{
     const skipSelectors = '{_SKIP_SELECTORS}';
-    const marker = '【标签】';
+    const tagMarker = /(?:^|\\n)\\s*(?:[#>*\\d.、()（）-]+\\s*)?(?:(?:【|\\[|（|\\()\\s*(?:标签|话题标签|商品标签|关键词|tags?|hashtags?)\\s*(?:】|\\]|）|\\))|(?:标签|话题标签|商品标签|关键词|tags?|hashtags?)\\s*[:：])/i;
     const walker = document.createTreeWalker(
         el,
         NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT
@@ -99,7 +125,7 @@ _EXTRACT_RESPONSE_JS = f"""el => {{
     let node;
     while ((node = walker.nextNode())) {{
         if (node.nodeType === Node.TEXT_NODE) {{
-            if ((node.textContent || '').includes(marker)) seenTags = true;
+            if (tagMarker.test(node.textContent || '')) seenTags = true;
             continue;
         }}
         if (!seenTags || !(node instanceof Element)) continue;
@@ -199,28 +225,153 @@ def batch_txt_path(image_paths: list[str]) -> str:
     return os.path.join(common, BATCH_TXT_NAME)
 
 
-def _section_body(text: str, label: str, next_labels: tuple[str, ...]) -> str | None:
-    if next_labels:
-        lookahead = "|".join(re.escape(n) for n in next_labels) + r"|\Z"
-    else:
-        lookahead = r"\Z"
-    pattern = re.compile(
-        rf"{re.escape(label)}\s*(.*?)(?={lookahead})",
-        re.DOTALL,
+_SECTION_ALIASES = {
+    "title": (
+        "商品标题",
+        "宝贝标题",
+        "文案标题",
+        "闲鱼标题",
+        "product title",
+        "标题",
+        "title",
+    ),
+    "description": (
+        "宝贝描述",
+        "商品描述",
+        "产品描述",
+        "商品文案",
+        "宝贝文案",
+        "description",
+        "正文",
+        "描述",
+        "desc",
+        "copy",
+    ),
+    "tags": (
+        "话题标签",
+        "商品标签",
+        "hashtags",
+        "keywords",
+        "关键词",
+        "关键字",
+        "标签",
+        "hashtag",
+        "tags",
+        "tag",
+    ),
+}
+
+
+def _normalize_alias(value: str) -> str:
+    return re.sub(r"[\s_\-]+", "", value).casefold()
+
+
+_ALIAS_TO_SECTION = {
+    _normalize_alias(alias): section
+    for section, aliases in _SECTION_ALIASES.items()
+    for alias in aliases
+}
+_SECTION_ALIAS_PATTERN = "|".join(
+    re.escape(alias)
+    for alias in sorted(
+        (alias for aliases in _SECTION_ALIASES.values() for alias in aliases),
+        key=len,
+        reverse=True,
     )
-    m = pattern.search(text)
-    if not m:
-        return None
-    return m.group(1).strip()
+)
+_SECTION_MARKER_RE = re.compile(
+    rf"(?:[【\[\(（「『]\s*(?P<bracket>{_SECTION_ALIAS_PATTERN})\s*"
+    rf"[】\]\)）」』]\s*[:：]?"
+    rf"|(?m:^[ \t]*(?:(?:#{{1,6}}|[-*>])\s*|\d+[.、)]\s*)?"
+    rf"(?P<line>{_SECTION_ALIAS_PATTERN})\s*"
+    rf"(?:[:：\-—]\s*|(?=$)))"
+    rf"|(?<!\w)(?P<inline>{_SECTION_ALIAS_PATTERN})\s*[:：]\s*)",
+    re.IGNORECASE,
+)
+
+
+def _clean_response_text(raw: str) -> str:
+    text = raw.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u200b", "").replace("\ufeff", "")
+    text = re.sub(r"(?m)^\s*```(?:json|markdown|text)?\s*$", "", text, flags=re.I)
+    text = re.sub(r"(?m)^\s*```\s*$", "", text)
+    return text.replace("**", "").replace("__", "").strip()
+
+
+def _find_section_markers(text: str) -> list[tuple[int, int, str]]:
+    markers: list[tuple[int, int, str]] = []
+    for match in _SECTION_MARKER_RE.finditer(text):
+        label = (
+            match.group("bracket")
+            or match.group("line")
+            or match.group("inline")
+        )
+        section = _ALIAS_TO_SECTION.get(_normalize_alias(label))
+        if section:
+            markers.append((match.start(), match.end(), section))
+    return markers
+
+
+def _extract_labeled_sections(
+    text: str,
+    markers: list[tuple[int, int, str]],
+) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    for index, (_, end, section) in enumerate(markers):
+        next_start = markers[index + 1][0] if index + 1 < len(markers) else len(text)
+        body = text[end:next_start].strip().lstrip(":：-—").strip()
+        if body and section not in sections:
+            sections[section] = body
+    return sections
+
+
+def _json_value_to_text(value: object) -> str:
+    if isinstance(value, list):
+        return " ".join(str(item).strip() for item in value if str(item).strip())
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    return ""
+
+
+def _extract_json_sections(text: str) -> dict[str, str]:
+    candidates = [text.strip()]
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.I | re.S)
+    candidates.extend(fenced)
+    first_brace = text.find("{")
+    last_brace = text.rfind("}")
+    if first_brace >= 0 and last_brace > first_brace:
+        candidates.append(text[first_brace : last_brace + 1])
+
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        sections: dict[str, str] = {}
+        for key, value in data.items():
+            section = _ALIAS_TO_SECTION.get(_normalize_alias(str(key)))
+            content = _json_value_to_text(value)
+            if section and content:
+                sections[section] = content
+        if sections:
+            return sections
+    return {}
 
 
 def _recover_unlabeled_title(prefix: str) -> str | None:
-    """标题标记缺失时，取【宝贝描述】前最后一条非套话文本作为标题。"""
+    """标题标记缺失时，取描述区段前最后一条非套话文本作为标题。"""
     candidates: list[str] = []
     for raw_line in prefix.splitlines():
         line = raw_line.strip()
         line = re.sub(r"^(?:[#*>\-]+\s*|\d+[.、)]\s*)", "", line)
-        line = re.sub(r"^(?:商品)?标题\s*[:：]\s*", "", line)
+        line = re.sub(
+            r"^(?:(?:商品|宝贝|文案|闲鱼)?标题|title)\s*[:：]\s*",
+            "",
+            line,
+            flags=re.I,
+        )
         line = line.strip().strip("*").strip()
         if not line:
             continue
@@ -236,26 +387,17 @@ def _recover_unlabeled_title(prefix: str) -> str | None:
 
 
 def _normalize_copy_window(raw: str) -> str:
-    """只保留三段文案窗口，并兼容标题标记缺失或标题前有套话。"""
-    text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+    """清理回复，并截断标签区段之后的文本分隔线和页脚。"""
+    text = _clean_response_text(raw)
     if not text:
         return ""
-
-    title_index = text.find("【标题】")
-    description_index = text.find("【宝贝描述】")
-    if title_index >= 0:
-        text = text[title_index:]
-    elif description_index >= 0:
-        recovered = _recover_unlabeled_title(text[:description_index])
-        if recovered:
-            text = f"【标题】{recovered}\n{text[description_index:]}"
-
-    tags_index = text.find("【标签】")
-    if tags_index >= 0:
-        tags_start = tags_index + len("【标签】")
-        match = _TEXT_SEPARATOR_RE.search(text, tags_start)
-        if match:
-            text = text[: match.start()].rstrip()
+    markers = _find_section_markers(text)
+    tag_starts = [end for _, end, section in markers if section == "tags"]
+    search_start = tag_starts[0] if tag_starts else text.find("#")
+    if search_start >= 0:
+        separator = _TEXT_SEPARATOR_RE.search(text, search_start)
+        if separator:
+            text = text[: separator.start()].rstrip()
     return text.strip()
 
 
@@ -282,16 +424,96 @@ def _trim_tags_footer(tags: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _extract_hashtag_tags(text: str) -> str | None:
+    tags = re.findall(r"(?<![\w#])#[^\s#，,。；;！!？?]+", text)
+    if not tags:
+        return None
+    return " ".join(dict.fromkeys(tags))
+
+
+def _remove_hashtag_tail(text: str) -> str:
+    """标签标记缺失时，避免把末尾 #标签 一并放进宝贝描述。"""
+    lines = text.splitlines()
+    kept: list[str] = []
+    for line in lines:
+        hash_index = line.find("#")
+        if hash_index >= 0:
+            prefix = line[:hash_index].strip()
+            if prefix:
+                kept.append(prefix)
+            break
+        kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def _clean_unlabeled_line(line: str) -> str:
+    line = re.sub(r"^(?:[#*>\-]+\s*|\d+[.、)]\s*)", "", line.strip())
+    return line.strip().strip("*").strip()
+
+
+def _extract_unlabeled_sections(text: str) -> dict[str, str]:
+    """完全无字段名时：首条有效文本作标题，中间正文作描述，#内容作标签。"""
+    tags = _extract_hashtag_tags(text)
+    content = _remove_hashtag_tail(text) if tags else text
+    lines: list[str] = []
+    for raw_line in content.splitlines():
+        line = _clean_unlabeled_line(raw_line)
+        if not line or _GENERIC_PREAMBLE_RE.search(line):
+            continue
+        lines.append(line)
+    if len(lines) < 2:
+        return {"tags": tags} if tags else {}
+    result = {
+        "title": lines[0],
+        "description": "\n".join(lines[1:]).strip(),
+    }
+    if tags:
+        result["tags"] = tags
+    return result
+
+
 def parse_gemini_copy(raw: str) -> ParsedCopy:
-    """从 Gemini 回复中切出标题 / 宝贝描述 / 标签。缺段则抛 ValueError。"""
+    """兼容标准标记、普通字段、Markdown、JSON 和字段名缺失的回复。"""
     text = _normalize_copy_window(raw)
     if not text:
         raise ValueError("回复为空")
 
-    title = _section_body(text, "【标题】", ("【宝贝描述】", "【标签】"))
-    description = _section_body(text, "【宝贝描述】", ("【标签】",))
-    tags_raw = _section_body(text, "【标签】", ())
-    tags = _trim_tags_footer(tags_raw) if tags_raw is not None else None
+    sections = _extract_json_sections(text)
+    markers = _find_section_markers(text)
+    sections.update(_extract_labeled_sections(text, markers))
+
+    title = sections.get("title", "").strip()
+    description = sections.get("description", "").strip()
+    tags = sections.get("tags", "").strip()
+
+    if not title and markers:
+        description_markers = [
+            start for start, _, section in markers if section == "description"
+        ]
+        prefix_end = description_markers[0] if description_markers else (
+            markers[0][0] if markers else len(text)
+        )
+        title = _recover_unlabeled_title(text[:prefix_end]) or ""
+
+    # 只有标题和标签字段时，标题字段常同时包含“首行标题 + 后续描述”。
+    if title and not description and "\n" in title:
+        title_lines = [line.strip() for line in title.splitlines() if line.strip()]
+        if len(title_lines) >= 2:
+            title = title_lines[0]
+            description = "\n".join(title_lines[1:])
+
+    if not tags:
+        tags = _extract_hashtag_tags(text) or ""
+    if description and "#" in description:
+        description = _remove_hashtag_tail(description)
+
+    # 仅在完全没有任何字段标记时启用整段猜测；若已有部分字段，
+    # 不把“宝贝描述”误当标题，交给自动格式修复补齐更可靠。
+    heuristic = _extract_unlabeled_sections(text) if not markers and not sections else {}
+    title = title or heuristic.get("title", "")
+    description = description or heuristic.get("description", "")
+    tags = tags or heuristic.get("tags", "")
+    tags = _trim_tags_footer(tags) if tags else ""
 
     missing: list[str] = []
     if not title:
@@ -305,6 +527,12 @@ def parse_gemini_copy(raw: str) -> ParsedCopy:
 
     assert title and description and tags
     return ParsedCopy(title=title, description=description, tags=tags)
+
+
+def _has_complete_section_markers(text: str) -> bool:
+    sections = set(_extract_json_sections(_clean_response_text(text)))
+    sections.update(section for _, _, section in _find_section_markers(text))
+    return {"title", "description", "tags"}.issubset(sections)
 
 
 def format_description_paragraphs(description: str) -> str:
@@ -679,8 +907,10 @@ def _extract_aimc_text(page) -> str:
 def _extract_reply_text(page) -> str:
     """优先取 AI Mode 回复块，否则回退整页文本。"""
     aimc = _extract_aimc_text(page)
-    if aimc and all(m in aimc for m in RESPONSE_MARKERS):
-        return aimc
+    # 回复块存在时必须直接使用；整页还包含用户提示词中的格式示例，
+    # 若回复使用了其他字段格式，回退整页会误把提示词当成回答。
+    if aimc:
+        return aimc.strip()
     try:
         body = page.locator("body").inner_text(timeout=5_000)
     except Exception:
@@ -716,7 +946,7 @@ def _wait_for_copy_ready(
         if prev and cur == prev:
             time.sleep(GENERATION_POLL_SEC)
             continue
-        need_stable = 2 if all(m in cur for m in RESPONSE_MARKERS) else 3
+        need_stable = 2 if _has_complete_section_markers(cur) else 3
         if cur == last:
             stable += 1
             if stable >= need_stable:
@@ -747,7 +977,7 @@ def process_one_image(
     except Exception as e:
         raise RuntimeError(f"复制图片到剪贴板失败: {e}") from e
 
-    _fill_prompt(page, prompt)
+    _fill_prompt(page, build_generation_prompt(prompt))
     try:
         _paste_image_from_clipboard(page)
         _wait_send_ready(page)
@@ -757,7 +987,20 @@ def process_one_image(
     _click_send(page)
 
     raw = _wait_for_copy_ready(page, previous=previous)
-    return parse_gemini_copy(raw)
+    try:
+        return parse_gemini_copy(raw)
+    except ValueError as first_error:
+        # 同一会话仍保留图片和上一条回答；让 Gemini 只重排格式，再解析一次。
+        _fill_prompt(page, FORMAT_REPAIR_PROMPT)
+        _click_send(page)
+        repaired_raw = _wait_for_copy_ready(page, previous=raw)
+        try:
+            return parse_gemini_copy(repaired_raw)
+        except ValueError as repair_error:
+            raise ValueError(
+                f"原回复解析失败（{first_error}）；"
+                f"自动格式修复后仍失败（{repair_error}）"
+            ) from repair_error
 
 
 ProgressCallback = Callable[[str], None]
