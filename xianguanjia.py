@@ -413,31 +413,48 @@ class XianGuanjiaSession:
         area.fill(description)
 
     def _setup_skus(self, page, spec_attr: str, specs: list[PublishSpec]) -> None:
-        add_btn = page.locator(".sku-add-btn").filter(has_text="添加多规格").first
+        add_btn = page.locator(".sku-add-btn:visible").filter(has_text="添加多规格").first
         if add_btn.count() == 0:
-            add_btn = page.locator("div.sku-add-btn, button:has-text('添加多规格')").first
+            add_btn = page.locator(
+                "div.sku-add-btn:visible, button:visible:has-text('添加多规格')"
+            ).first
         add_btn.click(timeout=10_000)
 
+        # 后续控件全部限制在当前可见的规格弹窗中，避免点到页面后方的同名按钮。
+        dialog = page.locator(
+            ".el-dialog__wrapper.sku-dlg-pro:visible, .sku-dlg-pro:visible"
+        ).last
+        dialog.wait_for(state="visible", timeout=15_000)
+
         # 规格属性名
-        attr_input = page.locator(
-            'input[placeholder*="商品规格1"], '
-            'input[placeholder*="请输入，按"]'
+        attr_input = dialog.locator(
+            'input.el-input__inner:visible[placeholder*="商品规格1"], '
+            'input.el-input__inner:visible[placeholder*="请输入，按"]'
         ).first
         attr_input.wait_for(state="visible", timeout=15_000)
         attr_input.click(timeout=5_000)
         attr_input.fill(spec_attr)
-
-        add_attr_btn = page.locator(
-            "button.el-button--primary:has-text('添加')"
-        ).first
-        add_attr_btn.click(timeout=5_000)
+        # 页面提示明确要求按回车确认属性名，不能点击页面全局的“添加”按钮。
+        attr_input.press("Enter")
         time.sleep(0.3)
 
         # 规格值：逐个输入并回车
-        value_input = page.locator(
-            'input[placeholder*="请输入"], '
-            'input[placeholder*="回车"]'
+        value_input = dialog.locator(
+            'input.el-input__inner:visible:not([placeholder*="商品规格1"])[placeholder*="请输入"], '
+            'input.el-input__inner:visible:not([placeholder*="商品规格1"])[placeholder*="回车"]'
         ).last
+        try:
+            value_input.wait_for(state="visible", timeout=3_000)
+        except Exception:
+            # 兼容仍需点击“添加”的旧页面，但只允许点击当前规格弹窗里的按钮。
+            add_attr_btn = dialog.locator(
+                "button.el-button--primary:visible"
+            ).filter(has_text=re.compile(r"^\s*添加\s*$")).last
+            if add_attr_btn.count() == 0:
+                raise RuntimeError("确认商品规格后未找到规格值输入框")
+            add_attr_btn.click(timeout=5_000)
+            value_input.wait_for(state="visible", timeout=10_000)
+
         for spec in specs:
             value_input.wait_for(state="visible", timeout=10_000)
             value_input.click(timeout=5_000)
@@ -445,11 +462,18 @@ class XianGuanjiaSession:
             value_input.press("Enter")
             time.sleep(0.25)
 
-        confirm = page.locator(
-            "button.el-button--primary:has-text('确认')"
-        ).first
+        confirm = dialog.locator(
+            "button.el-button--primary:visible"
+        ).filter(has_text=re.compile(r"^\s*确认\s*$")).last
+        if confirm.count() == 0:
+            confirm = dialog.locator(
+                "button.el-button--primary:visible:has-text('确认')"
+            ).last
         confirm.click(timeout=10_000)
-        time.sleep(0.6)
+        try:
+            dialog.wait_for(state="hidden", timeout=10_000)
+        except Exception:
+            time.sleep(0.6)
 
         self._fill_sku_prices_and_stock(page, specs)
 
